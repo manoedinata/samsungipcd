@@ -44,7 +44,7 @@ static size_t deque_push(struct deque* d, void* ptr, size_t sz)
         size_t cap2 = d->cap * 2;
         if(!cap2)
             cap2 = 16;
-        struct deque_elem* new_arr = malloc(cap2 * sizeof(new_arr));
+        struct deque_elem* new_arr = malloc(cap2 * sizeof(*new_arr));
         for(size_t i = 0; i < d->sz; i++)
             new_arr[i] = d->arr[(i + d->off) % d->sz];
         free(d->arr);
@@ -132,6 +132,8 @@ void* sipc_thread(void* arg)
     || ipc_client_open(rfs))
         ans = -1;
     write(thread_comm[1], &ans, sizeof(ans));
+    char* smsc_addr = NULL;
+    size_t smsc_addr_len = 0;
     for(;;)
     {
         int rdfd = thread_comm[1];
@@ -145,14 +147,30 @@ void* sipc_thread(void* arg)
         {
             if(ptr->type == THREAD_REQ_TYPE_SMS_SEND)
             {
-                void* blob = malloc(sizeof(struct ipc_sms_send_msg_request_header)+ptr->size);
+                uint8_t* pdu = ptr->ptr;
+                size_t sz = ptr->size;
+                if(ptr->size && !pdu[0])
+                    sz += smsc_addr_len;
+                void* blob = malloc(sizeof(struct ipc_sms_send_msg_request_header)+sz);
                 struct ipc_sms_send_msg_request_header* hdr = blob;
                 hdr->type = IPC_SMS_TYPE_OUTGOING;
                 hdr->msg_type = IPC_SMS_MSG_TYPE_SINGLE;
                 hdr->unknown = 0;
-                hdr->length = ptr->size;
-                memcpy((void*)(hdr+1), ptr->ptr, ptr->size);
-                ipc_client_send(fmt, seq_cntr++, IPC_SMS_SEND_MSG, IPC_TYPE_EXEC, blob, sizeof(blob));
+                hdr->length = sz;
+                uint8_t* payload = (void*)(hdr+1);
+                if(sz != ptr->size)
+                {
+                    memcpy(payload + (sz - ptr->size), ptr->ptr, ptr->size);
+                    payload[0] = smsc_addr_len;
+                    memcpy(payload+1, smsc_addr, smsc_addr_len);
+                }
+                else
+                    memcpy(payload, ptr->ptr, ptr->size);
+                printf("PDU before submit:");
+                for(size_t i = 0; i < sz; i++)
+                    printf(" %02hhx", payload[i]);
+                printf("\n");
+                ipc_client_send(fmt, seq_cntr++, IPC_SMS_SEND_MSG, IPC_TYPE_EXEC, blob, sizeof(struct ipc_sms_send_msg_request_header)+sz);
                 free(blob);
                 free(ptr->ptr);
             }
@@ -195,6 +213,20 @@ void* sipc_thread(void* arg)
         {
             if(ipc_gen_phone_res_check(msg.data))
                 printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
+        }
+        else if(msg.command == IPC_SMS_DEVICE_READY)
+            ipc_client_send(fmt, seq_cntr++, IPC_SMS_SVC_CENTER_ADDR, IPC_TYPE_GET, NULL, 0);
+        else if(msg.command == IPC_SMS_SVC_CENTER_ADDR)
+        {
+            uint8_t* smsc = (uint8_t*)msg.data;
+            smsc_addr_len = smsc[0];
+            smsc_addr = realloc(smsc_addr, smsc_addr_len);
+            memcpy(smsc_addr, smsc+1, smsc_addr_len);
+        }
+        else if(msg.command == IPC_SMS_SEND_MSG) //ack
+        {
+            struct ipc_sms_send_msg_response_data* resp = msg.data;
+            printf("IPC_SMS_SEND_MSG response, id=%hhx, ack=%hx\n", resp->id, resp->ack);
         }
         else if(msg.command == IPC_SMS_INCOMING_MSG)
         {
