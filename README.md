@@ -21,6 +21,6 @@ gcc server.c phonesim.c -o samsungipcd
 ## Usage
 
 1. Enable BSD pseudoterminals (`CONFIG_LEGACY_PTYS=y`)
-2. Launch it like this: `sudo samsungipcd -f /dev/ptywc` (note: the master end)
-3. Write a udev rule like this: `KERNEL=="ttywc", ENV{ID_MM_DEVICE_PROCESS}="1"` (note: the slave end)
+2. Launch it like this: `sudo samsungipcd /dev/ptywc /dev/ptywd` (note: the master end)
+3. Write a udev rule like this: `KERNEL=="ttywc", ENV{ID_MM_DEVICE_PROCESS}="1"` (note: the slave end, same rule for ttywd)
 4. Start ModemManager. It should now detect the proxy as a modem.
