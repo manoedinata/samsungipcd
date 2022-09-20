@@ -418,6 +418,11 @@ int modem_inet_set_apn(const char* apn)
     return -1;
 }
 
+int modem_inet_set_username_password(const char* username, const char* password)
+{
+    return 0;
+}
+
 const char* modem_inet_get_apn(void)
 {
     return NULL;

@@ -28,6 +28,8 @@ static int sms_index = -1;
 static char* sms_pdu = NULL;
 static size_t sms_pdu_len = 0;
 static char* apn = NULL;
+static char* username = NULL;
+static char* password = NULL;
 
 static void set_number(const char* new_number)
 {
@@ -55,6 +57,20 @@ static void set_apn(const char* new_apn)
     if(apn)
         free(apn);
     apn = new_apn ? strdup(new_apn) : NULL;
+}
+
+static void set_username(const char* new_username)
+{
+    if(username)
+        free(username);
+    username = new_username ? strdup(new_username) : NULL;
+}
+
+static void set_password(const char* new_password)
+{
+    if(password)
+        free(password);
+    password = new_password ? strdup(new_password) : NULL;
 }
 
 const char* modem_conf_get_name(int short_name)
@@ -216,6 +232,15 @@ int modem_inet_set_apn(const char* apn)
     printf("\rAPN: %s\n> ", apn);
     fflush(stdout);
     set_apn(apn);
+    return 0;
+}
+
+int modem_inet_set_username_password(const char* username, const char* password)
+{
+    printf("\rUsername: %s\nPassword: %s\n> ", username, password);
+    fflush(stdout);
+    set_username(username);
+    set_password(password);
     return 0;
 }
 

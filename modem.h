@@ -95,6 +95,7 @@ void modem_sms_incoming(int index); //indices must be unique in one session
 
 /* mobile internet */
 int modem_inet_set_apn(const char* apn);
+int modem_inet_set_username_password(const char* username, const char* password);
 const char* modem_inet_get_apn(void);
 int modem_inet_set_enabled(int is_enabled);
 int modem_inet_get_ipv4_address(char ip[4]);

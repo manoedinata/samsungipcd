@@ -205,34 +205,35 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
         return 0;
     }
     if(ppp[0] != (char)0xff || ppp[1] != (char)3)
+    {
+        free(ppp);
         return 0;
+    }
     if(!ppp_crc_valid(ppp, ppp_size))
+    {
+        free(ppp);
         return 0;
+    }
     uint16_t protocol = (uint16_t)(uint8_t)ppp[2] << 8 | (uint8_t)ppp[3];
     char* pkt = ppp + 4;
     size_t pkt_size = ppp_size - 6;
-#if 0
-    printf("PPP packet (protocol=0x%hx):", protocol);
-    for(size_t i = 0; i < pkt_size + 2; i++)
-        printf(" %02hhx", pkt[i]);
-    printf("\n");
-#endif
     if(protocol == 0xc021 /* LCP */)
     {
         if(pkt_size < 4)
+        {
+            free(ppp);
             return 0;
+        }
         if(pkt[0] == 1) //configure-request
         {
             if(pkt[2] == 0 && pkt[3] == 4)
             {
-                char* ppp2 = malloc(ppp_cap);
-                memcpy(ppp2, ppp, ppp_size);
-                size_t ppp2_size = ppp_size;
-                size_t ppp2_cap = ppp_cap;
-                ppp_crc_fix(ppp, ppp_size);
-                ppp2 = escape_ppp(ppp2, &ppp2_size, &ppp2_cap);
-                out_buf_write(out_buf, ppp2, ppp2_size);
-                free(ppp2);
+                char buf[32] = {0xff, 0x03, ppp[2], ppp[3], 1, pkt[1], 0x00, 0x08, 0x03, 0x04, 0xc0, 0x23, 0, 0};
+                size_t sz = 14;
+                size_t cap = 32;
+                ppp_crc_fix(buf, sz);
+                escape_ppp(buf, &sz, &cap);
+                out_buf_write(out_buf, buf, sz);
                 pkt[0] = 2; //configure-ack
                 ppp_crc_fix(ppp, ppp_size);
                 ppp = escape_ppp(ppp, &ppp_size, &ppp_cap);
@@ -264,10 +265,58 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             }
         }
     }
+    else if(protocol == 0xc023 /* PAP */)
+    {
+        if(pkt_size < 4 || pkt[0] != (char)1) //authenticate-request
+        {
+            free(ppp);
+            return 0;
+        }
+        size_t l = (uint16_t)(uint8_t)pkt[2] << 8 | (uint8_t)pkt[3];
+        if(l >= pkt_size)
+            l = pkt_size;
+        if(l < 6)
+        {
+            free(ppp);
+            return 0;
+        }
+        size_t szuser = (uint8_t)pkt[4];
+        size_t pszp = 5 + szuser;
+        if(pszp >= l)
+        {
+            free(ppp);
+            return 0;
+        }
+        size_t szp = pkt[pszp];
+        size_t totalsz = pszp + szp + 1;
+        if(totalsz > l)
+        {
+            free(ppp);
+            return 0;
+        }
+        pkt[pszp] = pkt[totalsz] = 0;
+        if(!modem_inet_set_username_password(pkt+5, pkt+pszp+1))
+        {
+            pkt[0] = 2;
+            modem_inet_set_enabled(1);
+        }
+        else
+            pkt[0] = 3;
+        pkt[2] = 0;
+        pkt[3] = 5;
+        pkt[4] = 0;
+        ppp_size = 11;
+        ppp_crc_fix(ppp, ppp_size);
+        ppp = escape_ppp(ppp, &ppp_size, &ppp_cap);
+        out_buf_write(out_buf, ppp, ppp_size);
+    }
     else if(protocol == 0x8021 /* IPCP */)
     {
         if(pkt_size < 4)
+        {
+            free(ppp);
             return 0;
+        }
         static char local_ip[4];
         if(modem_inet_get_ipv4_address(local_ip))
             memset(local_ip, 0, 4);
@@ -364,10 +413,7 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
         if(st->is_ppp)
         {
             if(handle_ppp(out_buf, ppp, ppp_size))
-            {
-                printf("Disabling PPP...\n");
                 st->is_ppp = 0;
-            }
             continue;
         }
         else if(st->want_pdu)
@@ -592,7 +638,6 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
         {
             WRITE_OK(out_buf);
             st->is_ppp = 1;
-            modem_inet_set_enabled(1);
         }
         else if(!st->is_gprs && !strncmp(cmd, "ATD", 3))
         {
