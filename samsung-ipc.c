@@ -412,3 +412,28 @@ int modem_sms_get_incoming_pdu(int index, const char** pdu, size_t* pdu_size)
     *pdu = pdu0;
     return ans;
 }
+
+int modem_inet_set_apn(const char* apn)
+{
+    return -1;
+}
+
+const char* modem_inet_get_apn(void)
+{
+    return NULL;
+}
+
+int modem_inet_set_enabled(int is_enabled)
+{
+    return is_enabled ? -1 : 0;
+}
+
+int modem_inet_get_ipv4_address(char ip[4])
+{
+    return -1;
+}
+
+int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
+{
+    return -1;
+}

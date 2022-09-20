@@ -27,6 +27,7 @@ static int is_online = 0;
 static int sms_index = -1;
 static char* sms_pdu = NULL;
 static size_t sms_pdu_len = 0;
+static char* apn = NULL;
 
 static void set_number(const char* new_number)
 {
@@ -47,6 +48,13 @@ static void set_pdu(const char* new_pdu, size_t new_len)
     }
     else
         sms_pdu = NULL;
+}
+
+static void set_apn(const char* new_apn)
+{
+    if(apn)
+        free(apn);
+    apn = new_apn ? strdup(new_apn) : NULL;
 }
 
 const char* modem_conf_get_name(int short_name)
@@ -201,6 +209,62 @@ int modem_sms_get_incoming_pdu(int index, const char** pdu, size_t* pdu_size)
     *pdu = sms_pdu;
     *pdu_size = sms_pdu_len;
     return 1;
+}
+
+int modem_inet_set_apn(const char* apn)
+{
+    printf("\rAPN: %s\n> ", apn);
+    fflush(stdout);
+    set_apn(apn);
+    return 0;
+}
+
+const char* modem_inet_get_apn()
+{
+    printf("\rAPN queried: %s\n> ", apn);
+    fflush(stdout);
+    return apn;
+}
+
+int modem_inet_set_enabled(int is_enabled)
+{
+    if(is_enabled && !is_online)
+    {
+        printf("\rCannot enable mobile internet while offline\n> ");
+        fflush(stdout);
+        return -1;
+    }
+    else if(is_enabled)
+        printf("\rEnabling mobile internet...\n> ");
+    else
+        printf("\rDisabling mobile internet...\n> ");
+    fflush(stdout);
+    return 0;
+}
+
+int modem_inet_get_ipv4_address(char buf[4])
+{
+    memset(buf, 10, 4);
+    return 0;
+}
+
+int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
+{
+    char* pkt2 = malloc(sz);
+    memcpy(pkt2, pkt, sz);
+    if(protocol != MODEM_PPP_PROTOCOL_IPV4)
+        return 0;
+    for(int i = 0; i < 4; i++)
+    {
+        char q = pkt2[i+12];
+        pkt2[i+12] = pkt2[i+16];
+        pkt2[i+16] = q;
+    }
+    pkt2[20] -= 8;
+    pkt2[22] += 8;
+    modem_inet_incoming_packet(protocol, pkt2, sz);
+    free(pkt2);
+    return 0;
 }
 
 int modem_poll_poll(const struct modem_fd_set* a, const struct modem_fd_set* b)

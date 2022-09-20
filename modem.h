@@ -1,5 +1,6 @@
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 
 /*
 This API currently assumes that the modem is a global singleton.
@@ -39,6 +40,12 @@ enum
     MODEM_REGISTRATION_MODE_MANUAL = 1,
     MODEM_REGISTRATION_MODE_DEREGISTER = 2,
     MODEM_REGISTRATION_MODE_MANUAL_AUTOMATIC = 4,
+};
+
+enum
+{
+    MODEM_PPP_PROTOCOL_IPV4 = 0x21,
+    MODEM_PPP_PROTOCOL_IPV6 = 0x57,
 };
 
 /* init */
@@ -85,3 +92,16 @@ int modem_sms_get_incoming_pdu(int index, const char** pdu, size_t* pdu_size); /
 
 /* sms-related callbacks */
 void modem_sms_incoming(int index); //indices must be unique in one session
+
+/* mobile internet */
+int modem_inet_set_apn(const char* apn);
+const char* modem_inet_get_apn(void);
+int modem_inet_set_enabled(int is_enabled);
+int modem_inet_get_ipv4_address(char ip[4]);
+int modem_inet_send_packet(int protocol, const char* pkt, size_t sz);
+
+/* mobile internet callbacks */
+void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz);
+
+/* utility */
+uint16_t ppp_crc(const char* data, size_t size);
