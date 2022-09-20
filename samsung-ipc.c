@@ -433,7 +433,7 @@ int modem_inet_set_enabled(int is_enabled)
     return is_enabled ? -1 : 0;
 }
 
-int modem_inet_get_ipv4_address(char ip[4])
+int modem_inet_get_ipv4_addresses(char ip[4], char dns1[4], char dns2[4])
 {
     return -1;
 }

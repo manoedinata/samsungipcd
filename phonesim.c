@@ -267,9 +267,11 @@ int modem_inet_set_enabled(int is_enabled)
     return 0;
 }
 
-int modem_inet_get_ipv4_address(char buf[4])
+int modem_inet_get_ipv4_addresses(char buf[4], char buf2[4], char buf3[4])
 {
     memset(buf, 10, 4);
+    memset(buf2, 0, 4);
+    memset(buf3, 0, 4);
     return 0;
 }
 

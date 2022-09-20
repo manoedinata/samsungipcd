@@ -317,9 +317,12 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             free(ppp);
             return 0;
         }
-        static char local_ip[4];
-        if(modem_inet_get_ipv4_address(local_ip))
-            memset(local_ip, 0, 4);
+        char local_ip[4], dns1[4], dns2[4];
+        if(modem_inet_get_ipv4_addresses(local_ip, dns1, dns2))
+        {
+            free(ppp);
+            return 0;
+        }
         if(pkt[0] == 1) //configure-request
         {
             int ip_ok = 1;
@@ -831,6 +834,18 @@ void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz)
         if(connections[i] && connections[i]->status.is_ppp)
             out_buf_write(&connections[i]->out_buf, ppp_pkt, ppp_sz);
     free(ppp_pkt);
+}
+
+void modem_inet_disconnected(void)
+{
+    char ppp[32] = {0xff, 0x03, 0xc0, 0x21, 0x05, 0x00, 0x00, 0x04};
+    size_t ppp_size = 10;
+    size_t ppp_cap = 32;
+    ppp_crc_fix(ppp, ppp_size);
+    escape_ppp(ppp, &ppp_size, &ppp_cap);
+    for(int i = 0; i < FD_SETSIZE; i++)
+        if(connections[i] && connections[i]->status.is_ppp)
+            out_buf_write(&connections[i]->out_buf, ppp, ppp_size);
 }
 
 static int open_pty(const char* path, struct modem_fd_set* rdsocks, int is_gprs)

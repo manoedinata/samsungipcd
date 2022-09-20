@@ -98,11 +98,12 @@ int modem_inet_set_apn(const char* apn);
 int modem_inet_set_username_password(const char* username, const char* password);
 const char* modem_inet_get_apn(void);
 int modem_inet_set_enabled(int is_enabled);
-int modem_inet_get_ipv4_address(char ip[4]);
+int modem_inet_get_ipv4_addresses(char ip[4], char dns1[4], char dns2[4]);
 int modem_inet_send_packet(int protocol, const char* pkt, size_t sz);
 
 /* mobile internet callbacks */
 void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz);
+void modem_inet_disconnected(void);
 
 /* utility */
 uint16_t ppp_crc(const char* data, size_t size);
