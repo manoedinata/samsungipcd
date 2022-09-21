@@ -869,6 +869,18 @@ static int open_pty(const char* path, struct modem_fd_set* rdsocks, int is_gprs)
     int fd = open(path, O_RDWR | O_NOCTTY);
     if(fd < 0)
         return -1;
+    if(!strncmp(path, "/dev/pty", 8))
+    {
+        char* path2 = strdup(path);
+        path2[5] = 't';
+        int fd2 = open(path2, O_RDWR | O_NOCTTY);
+        free(path2);
+        if(fd2 < 0)
+        {
+            close(fd);
+            return -1;
+        }
+    }
     struct client_conn* conn = malloc(sizeof(*conn));
     memset(conn, 0, sizeof(*conn));
     conn->fd = fd;
@@ -943,6 +955,7 @@ int main(int argc, const char** argv)
                     free(conn->in_buf.data);
                     free(conn->out_buf.data);
                     free(conn);
+#if 0
                     if(i == pty_fd)
                     {
                         pty_fd = open_pty(pty_path, &rdsocks, 0);
@@ -961,6 +974,7 @@ int main(int argc, const char** argv)
                             return 1;
                         }
                     }
+#endif
                 }
                 else if(conn->out_buf.sz)
                     modem_poll_fd_set(conn->fd, &wrsocks);
