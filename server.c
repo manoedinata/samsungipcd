@@ -385,7 +385,17 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
         }
     }
     else if(protocol == 0x21 /* IPv4 */ || protocol == 0x57 /* IPv6 */)
-        modem_inet_send_packet(protocol, pkt, pkt_size);
+    {
+        if(pkt_size < 4 || ((uint8_t)pkt[0] & 0xf0) != 0x40)
+        {
+            free(ppp);
+            return 0;
+        }
+        size_t sz = (uint16_t)(uint8_t)pkt[2] << 8 | (uint8_t)pkt[3];
+        if(sz > pkt_size)
+            sz = pkt_size;
+        modem_inet_send_packet(protocol, pkt, sz);
+    }
     else
     {
         char buf[32] = {0xff, 0x03, 0xc0, 0x21, 0x08, 0x00, 0x00, 0x06, ppp[2], ppp[3], 0, 0};
@@ -796,7 +806,7 @@ static void broadcast_notification(const char* s)
 {
     size_t l = strlen(s);
     for(int i = 0; i < FD_SETSIZE; i++)
-        if(connections[i])
+        if(connections[i] && !connections[i]->status.is_ppp)
         {
             out_buf_write(&connections[i]->out_buf, s, l);
             modem_poll_fd_set(i, &wrsocks);
@@ -832,7 +842,10 @@ void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz)
     ppp_pkt = escape_ppp(ppp_pkt, &ppp_sz, &ppp_cap);
     for(int i = 0; i < FD_SETSIZE; i++)
         if(connections[i] && connections[i]->status.is_ppp)
+        {
             out_buf_write(&connections[i]->out_buf, ppp_pkt, ppp_sz);
+            modem_poll_fd_set(i, &wrsocks);
+        }
     free(ppp_pkt);
 }
 
@@ -845,7 +858,10 @@ void modem_inet_disconnected(void)
     escape_ppp(ppp, &ppp_size, &ppp_cap);
     for(int i = 0; i < FD_SETSIZE; i++)
         if(connections[i] && connections[i]->status.is_ppp)
+        {
             out_buf_write(&connections[i]->out_buf, ppp, ppp_size);
+            modem_poll_fd_set(i, &wrsocks);
+        }
 }
 
 static int open_pty(const char* path, struct modem_fd_set* rdsocks, int is_gprs)

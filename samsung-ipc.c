@@ -17,10 +17,17 @@ You should have received a copy of the GNU General Public License along with thi
 #include <string.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/un.h>
+#include <netinet/in.h>
+#include <netinet/if_ether.h>
+#include <netpacket/packet.h>
+#include <net/if.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include "modem.h"
+
+#define INTERFACE_NAME "rmnet0"
 
 struct deque_elem
 {
@@ -99,6 +106,24 @@ static int net_status = IPC_NET_REGISTRATION_STATUS_NONE;
 static int plmn_code = -1;
 static int rssi = 0;
 
+static char* gprs_apn;
+static char* gprs_username;
+static char* gprs_password;
+static char gprs_ip[4];
+static char gprs_dns1[4];
+static char gprs_dns2[4];
+static int need_gprs;
+static int have_gprs;
+static int rmnet_fd;
+static int packet_fd;
+
+static void update_one(char** which, const char* new_value)
+{
+    if(*which)
+        free(*which);
+    *which = new_value ? strdup(new_value) : NULL;
+}
+
 static struct deque sms_storage;
 static pthread_mutex_t sms_storage_lock;
 
@@ -112,12 +137,27 @@ struct thread_req
 enum
 {
     THREAD_REQ_TYPE_SMS_SEND,
-    THREAD_REQ_TYPE_SMS_INCOMING
+    THREAD_REQ_TYPE_SMS_INCOMING,
+    THREAD_REQ_TYPE_SET_GPRS,
 };
 
 static uint8_t seq_cntr = 0;
 
-void* sipc_thread(void* arg)
+static int ifdownup(void)
+{
+    struct ifreq ifr = { .ifr_name = INTERFACE_NAME };
+    if(ioctl(rmnet_fd, SIOCGIFFLAGS, &ifr))
+        return -1;
+    ifr.ifr_flags &= ~(IFF_UP | IFF_RUNNING);
+    if(ioctl(rmnet_fd, SIOCSIFFLAGS, &ifr))
+        return -1;
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+    if(ioctl(rmnet_fd, SIOCSIFFLAGS, &ifr))
+        return -1;
+    return 0;
+}
+
+static void* sipc_thread(void* arg)
 {
     fcntl(thread_comm[1], F_SETFL, fcntl(thread_comm[1], F_GETFL) | O_NONBLOCK);
     struct ipc_client* fmt = ipc_client_create(IPC_CLIENT_TYPE_FMT);
@@ -174,6 +214,31 @@ void* sipc_thread(void* arg)
                 free(blob);
                 free(ptr->ptr);
             }
+            else if(ptr->type == THREAD_REQ_TYPE_SET_GPRS)
+            {
+                int enabled = ptr->size;
+                if(enabled && !need_gprs)
+                {
+                    need_gprs = 1;
+                    struct ipc_gprs_define_pdp_context_data data;
+                    char apn[sizeof(data.apn)] = {0};
+                    LOCKED()
+                        strncpy(apn, gprs_apn, sizeof(apn));
+                    ipc_gprs_define_pdp_context_setup(&data, 1, 1, apn);
+                    ipc_client_send(fmt, seq_cntr++, IPC_GPRS_DEFINE_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+                }
+                if(!enabled && need_gprs)
+                {
+                    need_gprs = 0;
+                    struct ipc_gprs_pdp_context_request_set_data data;
+                    char username[sizeof(data.username)] = {0};
+                    char password[sizeof(data.password)] = {0};
+                    ipc_gprs_pdp_context_request_set_setup(&data, 0, 1, username, password);
+                    ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+                    LOCKED() have_gprs = 0;
+                    modem_inet_disconnected();
+                }
+            }
             free(ptr);
         }
         struct ipc_message msg;
@@ -211,8 +276,22 @@ void* sipc_thread(void* arg)
         }
         else if(msg.command == IPC_GEN_PHONE_RES)
         {
+            struct ipc_gen_phone_res_data* pld = msg.data;
             if(ipc_gen_phone_res_check(msg.data))
                 printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
+            else if(IPC_COMMAND(pld->group, pld->index) == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
+            {
+                struct ipc_gprs_pdp_context_request_set_data data;
+                char username[sizeof(data.username)];
+                char password[sizeof(data.password)];
+                LOCKED()
+                {
+                    strncpy(username, gprs_username, sizeof(username));
+                    strncpy(password, gprs_password, sizeof(password));
+                }
+                ipc_gprs_pdp_context_request_set_setup(&data, 1, 1, username, password);
+                ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+            }
         }
         else if(msg.command == IPC_SMS_DEVICE_READY)
             ipc_client_send(fmt, seq_cntr++, IPC_SMS_SVC_CENTER_ADDR, IPC_TYPE_GET, NULL, 0);
@@ -248,13 +327,72 @@ void* sipc_thread(void* arg)
             req->size = idx;
             write(thread_comm[1], &req, sizeof(req));
         }
+        else if(msg.command == IPC_GPRS_IP_CONFIGURATION)
+        {
+            struct ipc_gprs_ip_configuration_data* data = msg.data;
+            LOCKED()
+            {
+                memcpy(gprs_ip, data->ip, 4);
+                memcpy(gprs_dns1, data->dns1, 4);
+                memcpy(gprs_dns2, data->dns2, 4);
+                have_gprs = 1;
+            }
+            ifdownup();
+        }
         free(msg.data);
     }
     return 0;
 }
 
+static int open_rmnet(void)
+{
+    struct ifreq ifr = {
+        .ifr_name = INTERFACE_NAME,
+    };
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if(sock < 0)
+        return -1;
+    if(setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, INTERFACE_NAME, sizeof(INTERFACE_NAME)-1))
+    {
+        close(sock);
+        return -1;
+    }
+    fcntl(sock, F_SETFL, fcntl(sock, F_GETFL) | O_NONBLOCK);
+    return sock;
+}
+
+static int open_packet(void)
+{
+    struct ifreq ifr = {
+        .ifr_name = INTERFACE_NAME,
+    };
+    struct sockaddr_ll addr = {
+        .sll_family = AF_PACKET,
+        .sll_protocol = 0,
+    };
+    int sock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+    if(sock < 0)
+        return -1;
+    if(ioctl(sock, SIOCGIFINDEX, &ifr)
+    || ((addr.sll_ifindex = ifr.ifr_ifindex), bind(sock, (void*)&addr, sizeof(addr))))
+    {
+        close(sock);
+        return -1;
+    }
+    fcntl(sock, F_SETFL, fcntl(sock, F_GETFL) | O_NONBLOCK);
+    return sock;
+}
+
 int modem_init(void)
 {
+    rmnet_fd = open_rmnet();
+    if(rmnet_fd < 0)
+        return -1;
+#if 0
+    packet_fd = open_packet();
+    if(packet_fd < 0)
+        return -1;
+#endif
     pthread_mutex_init(&global_lock, NULL);
     pthread_mutex_init(&sms_storage_lock, NULL);
     if(socketpair(AF_UNIX, SOCK_STREAM, 0, thread_comm))
@@ -272,11 +410,21 @@ int modem_init(void)
 int modem_poll_update_fds(struct modem_fd_set* rs, struct modem_fd_set* ws)
 {
     modem_poll_fd_set(thread_comm[0], rs);
+    //modem_poll_fd_set(packet_fd, rs);
     return 0;
 }
 
 static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws, int target, struct thread_req** req)
 {
+#if 0
+    if(rs && modem_poll_fd_isset(packet_fd, rs))
+    {
+        char buf[1500];
+        ssize_t sz;
+        while((sz = read(packet_fd, buf, sizeof(buf))) >= 0)
+            modem_inet_incoming_packet(MODEM_PPP_PROTOCOL_IPV4, buf, sz);
+    }
+#endif
     if(rs && !modem_poll_fd_isset(thread_comm[0], rs))
         return 0;
     struct thread_req* cmd;
@@ -415,30 +563,61 @@ int modem_sms_get_incoming_pdu(int index, const char** pdu, size_t* pdu_size)
 
 int modem_inet_set_apn(const char* apn)
 {
-    return -1;
+    LOCKED() update_one(&gprs_apn, apn);
+    return 0;
 }
 
 int modem_inet_set_username_password(const char* username, const char* password)
 {
+    LOCKED()
+    {
+        update_one(&gprs_username, username);
+        update_one(&gprs_password, password);
+    }
     return 0;
 }
 
 const char* modem_inet_get_apn(void)
 {
-    return NULL;
+    return gprs_apn;
 }
 
 int modem_inet_set_enabled(int is_enabled)
 {
-    return is_enabled ? -1 : 0;
+    struct thread_req* req = malloc(sizeof(*req));
+    req->type = THREAD_REQ_TYPE_SET_GPRS;
+    req->ptr = NULL;
+    req->size = is_enabled;
+    if(write(thread_comm[0], &req, sizeof(req)) != sizeof(req))
+        return -1;
+    return 0;
 }
 
 int modem_inet_get_ipv4_addresses(char ip[4], char dns1[4], char dns2[4])
 {
-    return -1;
+    int hg;
+    LOCKED()
+    {
+        hg = have_gprs;
+        memcpy(ip, gprs_ip, 4);
+        memcpy(dns1, gprs_dns1, 4);
+        memcpy(dns2, gprs_dns2, 4);
+    }
+    if(!hg)
+        return -1;
+    return 0;
 }
 
 int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
 {
-    return -1;
+    if(protocol == MODEM_PPP_PROTOCOL_IPV4)
+    {
+        if(sz < 20)
+            return -1;
+        struct sockaddr_in dst = { .sin_family = AF_INET };
+        memcpy(&dst.sin_addr.s_addr, pkt+16, 4);
+        return sendto(rmnet_fd, pkt, sz, 0, (void*)&dst, sizeof(dst)) == sz;
+    }
+    else
+        return -1;
 }
