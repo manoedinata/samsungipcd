@@ -8,6 +8,7 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 You should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
+#define _GNU_SOURCE
 #include <time.h>
 #include <samsung-ipc.h>
 #include <stdio.h>
@@ -28,6 +29,43 @@ You should have received a copy of the GNU General Public License along with thi
 #include "modem.h"
 
 #define INTERFACE_NAME "rmnet0"
+
+#ifndef PREFIX
+#define PREFIX "/usr"
+#endif
+
+static int voicecall_wrpipe = -1;
+
+static void end_voicecall(void)
+{
+    if(voicecall_wrpipe >= 0)
+    {
+        write(voicecall_wrpipe, "\n", 1);
+        close(voicecall_wrpipe);
+        voicecall_wrpipe = -1;
+    }
+}
+
+static void start_voicecall(void)
+{
+    if(voicecall_wrpipe >= 0)
+        return;
+    int pp[2];
+    if(pipe2(pp, O_CLOEXEC))
+        return;
+    pid_t voicecall_pid = fork();
+    if(voicecall_pid == 0)
+    {
+        dup2(pp[0], 0);
+        execl(PREFIX "/libexec/samsungipcd/voicecall.sh", "voicecall.sh", NULL);
+        _exit(179);
+    }
+    else if(voicecall_pid >= 0)
+        voicecall_wrpipe = pp[1];
+    else
+        close(pp[1]);
+    close(pp[0]);
+}
 
 struct deque_elem
 {
@@ -106,6 +144,10 @@ static int net_status = IPC_NET_REGISTRATION_STATUS_NONE;
 static int plmn_code = -1;
 static int rssi = 0;
 
+static int call_state;
+static int call_direction;
+static char* call_number;
+
 static char* gprs_apn;
 static char* gprs_username;
 static char* gprs_password;
@@ -117,11 +159,16 @@ static int have_gprs;
 static int rmnet_fd;
 static int packet_fd;
 
-static void update_one(char** which, const char* new_value)
+static void update_one_owned(char** which, char* new_value)
 {
     if(*which)
         free(*which);
-    *which = new_value ? strdup(new_value) : NULL;
+    *which = new_value;
+}
+
+static void update_one(char** which, const char* new_value)
+{
+    update_one_owned(which, new_value ? strdup(new_value) : NULL);
 }
 
 static struct deque sms_storage;
@@ -139,6 +186,7 @@ enum
     THREAD_REQ_TYPE_SMS_SEND,
     THREAD_REQ_TYPE_SMS_INCOMING,
     THREAD_REQ_TYPE_SET_GPRS,
+    THREAD_REQ_TYPE_DIAL,
 };
 
 static uint8_t seq_cntr = 0;
@@ -237,6 +285,34 @@ static void* sipc_thread(void* arg)
                     ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
                     LOCKED() have_gprs = 0;
                     modem_inet_disconnected();
+                }
+            }
+            else if(ptr->type == THREAD_REQ_TYPE_DIAL)
+            {
+                char* number = ptr->ptr;
+                if(number)
+                {
+                    struct ipc_call_outgoing_data data = {
+                        .type = IPC_CALL_TYPE_VOICE,
+                        .identity = IPC_CALL_IDENTITY_DEFAULT,
+                        .number_length = strlen(number),
+                        .prefix = IPC_CALL_PREFIX_NONE,
+                    };
+                    strncpy(data.number, number, sizeof(data.number));
+                    ipc_client_send(fmt, seq_cntr++, IPC_CALL_OUTGOING, IPC_TYPE_EXEC, &data, sizeof(data));
+                    free(number);
+                }
+                else if(ptr->size)
+                {
+                    ipc_client_send(fmt, seq_cntr++, IPC_CALL_ANSWER, IPC_TYPE_EXEC, NULL, 0);
+                    start_voicecall();
+                }
+                else
+                {
+                    ipc_client_send(fmt, seq_cntr++, IPC_CALL_RELEASE, IPC_TYPE_EXEC, NULL, 0);
+                    end_voicecall();
+                    call_state = -1;
+                    call_direction = -1;
                 }
             }
             free(ptr);
@@ -339,6 +415,49 @@ static void* sipc_thread(void* arg)
             }
             ifdownup();
         }
+        else if(msg.command == IPC_CALL_STATUS)
+        {
+            struct ipc_call_status_data* st = msg.data;
+            printf("%d\n", st->status);
+            LOCKED()
+            {
+                switch(st->status)
+                {
+                case IPC_CALL_STATUS_DIALING:
+                    call_state = MODEM_CALL_STATE_DIALING;
+                    start_voicecall();
+                    break;
+                case IPC_CALL_STATUS_CONNECTED:
+                    call_state = MODEM_CALL_STATE_ACTIVE;
+                    start_voicecall();
+                    break;
+                case IPC_CALL_STATUS_RELEASED:
+                {
+                    call_state = -1;
+                    call_direction = -1;
+                    end_voicecall();
+                    struct thread_req* req = malloc(sizeof(*req));
+                    req->type = THREAD_REQ_TYPE_DIAL;
+                    req->ptr = NULL;
+                    req->size = 0;
+                    write(thread_comm[1], &req, sizeof(req));
+                    break;
+                }
+                }
+            }
+        }
+        else if(msg.command == IPC_CALL_INCOMING)
+        {
+            struct ipc_call_incoming_data* data = msg.data;
+            if(data->type == IPC_CALL_TYPE_VOICE)
+            {
+                struct thread_req* req = malloc(sizeof(*req));
+                req->type = THREAD_REQ_TYPE_DIAL;
+                req->ptr = NULL;
+                req->size = 1;
+                write(thread_comm[1], &req, sizeof(req));
+            }
+        }
         free(msg.data);
     }
     return 0;
@@ -440,6 +559,28 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
             size_t idx = cmd->size;
             modem_sms_incoming(idx);
         }
+        else if(cmd->type == THREAD_REQ_TYPE_DIAL)
+        {
+            if(cmd->size)
+            {
+                LOCKED()
+                {
+                    call_state = MODEM_CALL_STATE_INCOMING;
+                    call_direction = MODEM_CALL_DIRECTION_INCOMING;
+                }
+                modem_call_incoming();
+            }
+            else
+            {
+                LOCKED()
+                {
+                    call_state = -1;
+                    call_direction = -1;
+                    update_one(&call_number, NULL);
+                }
+                modem_call_remote_hangup();
+            }
+        }
         free(cmd);
     }
     return 0;
@@ -505,7 +646,7 @@ int modem_registration_get_status(void)
     return net_status - 1;
 }
 
-int modem_registration_get_rssi(void) //TODO
+int modem_registration_get_rssi(void)
 {
     int ans;
     LOCKED() ans = rssi;
@@ -521,21 +662,61 @@ double modem_registration_get_error_rate(void) //FIXME
 
 int modem_call_dial(const char* number)
 {
-    return -1;
+    LOCKED()
+    {
+        call_state = MODEM_CALL_STATE_DIALING;
+        call_direction = MODEM_CALL_DIRECTION_OUTGOING;
+        update_one(&call_number, number);
+    }
+    struct thread_req* q = malloc(sizeof(*q));
+    q->type = THREAD_REQ_TYPE_DIAL;
+    q->ptr = strdup(number);
+    q->size = 0;
+    write(thread_comm[0], &q, sizeof(q));
+    return 0;
 }
 
 int modem_call_get_info(const char** number, int* state, int* direction)
 {
-    return 0;
+    int ans;
+    LOCKED()
+    {
+        if(call_direction >= 0 && call_state >= 0)
+        {
+            *direction = call_direction;
+            *state = call_state;
+            *number = call_number;
+            ans = 1;
+        }
+        else
+        {
+            call_direction = -1;
+            call_state = -1;
+            update_one(&call_number, NULL);
+            ans = 0;
+        }
+    }
+    return ans;
+}
+
+static void do_send_answer(int q)
+{
+    struct thread_req* req = malloc(sizeof(*req));
+    req->type = THREAD_REQ_TYPE_DIAL;
+    req->ptr = NULL;
+    req->size = q;
+    write(thread_comm[0], &req, sizeof(req));
 }
 
 int modem_call_answer(void)
 {
-    return -1;
+    do_send_answer(1);
+    return 0;
 }
 
 int modem_call_hangup(void)
 {   
+    do_send_answer(0);
     return 0;
 }
 

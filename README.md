@@ -8,10 +8,13 @@ This is a proxy that provides standard AT command interface to Samsung modems us
 
 * Sending and receiving SMS
 * Mobile data
+* Voice calls
 
 ## Unimplemented
 
-* Voice calls
+* Call volume control
+* DTMF tones (in-call number keyboard)
+* USSD codes (pseudo-numbers with textual answers)
 * SIM unlocking
 
 ## Won't work (AT limitations)

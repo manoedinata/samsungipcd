@@ -21,6 +21,7 @@ You should have received a copy of the GNU General Public License along with thi
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 
 struct io_buf
 {
@@ -892,6 +893,7 @@ static int open_pty(const char* path, struct modem_fd_set* rdsocks, int is_gprs)
 
 int main(int argc, const char** argv)
 {
+    signal(SIGPIPE, SIG_IGN);
     if(argc != 3)
     {
         printf("usage: samsungipcd <gsm_path> <gprs_path>\n");
