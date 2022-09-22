@@ -4,7 +4,19 @@ __This is an early prototype. Pretty much nothing works yet.__
 
 This is a proxy that provides standard AT command interface to Samsung modems using libsamsung-ipc. Can be used with ModemManager or oFono as clients.
 
-Currently only receiving SMS messages works.
+## Works
+
+* Sending and receiving SMS
+* Mobile data
+
+## Unimplemented
+
+* Voice calls
+* SIM unlocking
+
+## Won't work (AT limitations)
+
+* Muting microphone in voice calls
 
 ## Building
 
