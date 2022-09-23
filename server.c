@@ -161,10 +161,18 @@ static int unescape_ppp(char* ppp, size_t* p_sz)
 
 static char* escape_ppp(char* ppp, size_t* p_sz, size_t* p_cap)
 {
+#ifdef PPP_DUMP
+    char* ppp3 = malloc(*p_sz);
+    memcpy(ppp3, ppp, *p_sz);
+    printf("Escaping PPP:");
+    for(size_t i = 0; i < *p_sz; i++)
+        printf(" %02hhx", ppp[i]);
+    printf("\n");
+#endif
     size_t sz = *p_sz;
     size_t sz1 = sz+2;
     for(size_t i = 0; i < sz; i++)
-        if(ppp[i] == (char)0x7d || ppp[i] == (char)0x7e || (uint8_t)ppp[i] <= 0x20)
+        if(ppp[i] == (char)0x7d || ppp[i] == (char)0x7e || (uint8_t)ppp[i] < 0x20)
             sz1++;
     if(sz1 > *p_cap)
         ppp = realloc(ppp, *p_cap = sz1);
@@ -172,7 +180,7 @@ static char* escape_ppp(char* ppp, size_t* p_sz, size_t* p_cap)
     char* dst = ppp + sz1;
     *--dst = (char)0x7e;
     for(size_t i = sz - 1; i + 1; i--)
-        if(ppp[i] == (char)0x7d || ppp[i] == (char)0x7e || (uint8_t)ppp[i] <= 0x20)
+        if(ppp[i] == (char)0x7d || ppp[i] == (char)0x7e || (uint8_t)ppp[i] < 0x20)
         {
             *--dst = ppp[i] ^ 0x20;
             *--dst = (char)0x7d;
@@ -180,6 +188,22 @@ static char* escape_ppp(char* ppp, size_t* p_sz, size_t* p_cap)
         else
             *--dst = ppp[i];
     *--dst = (char)0x7e;
+#ifdef PPP_DUMP
+    sz1 -= 2;
+    char* ppp2 = malloc(sz1);
+    memcpy(ppp2, ppp+1, sz1);
+    int status = unescape_ppp(ppp2, &sz1);
+    if(status || sz1 != sz || memcmp(ppp2, ppp3, sz))
+    {
+        printf("ESCAPE/UNESCAPE BROKEN: %d\n", status);
+        printf("Reescape PPP:");
+        for(size_t i = 0; i < sz1; i++)
+            printf(" %02hhx", ppp2[i]);
+        printf("\n");
+    }
+    free(ppp2);
+    free(ppp3);
+#endif
     return ppp;
 }
 
@@ -218,6 +242,12 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
     uint16_t protocol = (uint16_t)(uint8_t)ppp[2] << 8 | (uint8_t)ppp[3];
     char* pkt = ppp + 4;
     size_t pkt_size = ppp_size - 6;
+#ifdef PPP_DUMP
+    printf("PPP packet (protocol=0x%x):", protocol);
+    for(size_t i = 0; i < pkt_size; i++)
+        printf(" %02hhx", pkt[i]);
+    printf("\n");
+#endif
     if(protocol == 0xc021 /* LCP */)
     {
         if(pkt_size < 4)
@@ -326,7 +356,7 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
         }
         if(pkt[0] == 1) //configure-request
         {
-            int ip_ok = 1;
+            int ip_nak = 0;
             int have_ip = 0;
             int have_rej = 0;
             size_t l = (uint16_t)(uint8_t)pkt[2] << 8 | (uint8_t)pkt[3];
@@ -335,11 +365,32 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             char* q = pkt + 4;
             for(size_t i = 4; i + 1 < l; i += (uint8_t)pkt[i+1])
             {
-                if(pkt[i] == 3 && pkt[i+1] == 6 && i + 5 < l && !have_ip)
+                if(pkt[i] == 3 && pkt[i+1] == 6 && i + 5 < l && !(have_ip & 1))
                 {
-                    have_ip = 1;
+                    have_ip |= 1;
                     if(memcmp(pkt+i+2, local_ip, 4))
-                        ip_ok = 0;
+                    {
+                        memcpy(pkt+i+2, local_ip, 4);
+                        ip_nak |= (1 << 3);
+                    }
+                }
+                else if(pkt[i] == (char)0x81 && pkt[i+1] == 6 && i + 5 < l && !(have_ip & 2))
+                {
+                    have_ip |= 2;
+                    if(memcmp(pkt+i+2, dns1, 4))
+                    {
+                        memcpy(pkt+i+2, dns1, 4);
+                        ip_nak |= (1 << 9);
+                    }
+                }
+                else if(pkt[i] == (char)0x83 && pkt[i+1] == 6 && i + 5 < l && !(have_ip & 4))
+                {
+                    have_ip |= 4;
+                    if(memcmp(pkt+i+2, dns2, 4))
+                    {
+                        memcpy(pkt+i+2, dns2, 4);
+                        ip_nak |= (1 << 1);
+                    }
                 }
                 else
                 {
@@ -358,27 +409,31 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
                 pkt[3] = q - pkt;
                 ppp_size = (q - ppp) + 2;
             }
-            else if(!ip_ok)
-            {
-                pkt[0] = 3; //configure-nak
-                pkt[2] = 0;
-                pkt[3] = 10;
-                pkt[4] = 3;
-                pkt[5] = 6;
-                memcpy(pkt+6, local_ip, 4);
-                ppp_size = 16;
-            }
             else
             {
                 char* ppp2 = malloc(ppp_cap);
                 size_t ppp2_size = ppp_size;
                 size_t ppp2_cap = ppp_cap;
                 memcpy(ppp2, ppp, ppp2_size);
+                char* pkt2 = ppp2 + 4;
+                char* q = pkt2 + 4;
+                for(size_t i = 4; i + 1 < l; i += (uint8_t)pkt2[i+1])
+                    if(pkt2[i] == 3)
+                    {
+                        size_t sz = (uint8_t)pkt2[i+1];
+                        if(sz >= l - i)
+                            sz = l - i;
+                        memmove(q, pkt2+i, sz);
+                        q += sz;
+                    }
+                pkt2[2] = (q - pkt2) >> 8;
+                pkt2[3] = q - pkt2;
+                ppp2_size = (q - ppp2) + 2;
                 ppp_crc_fix(ppp2, ppp2_size);
                 ppp2 = escape_ppp(ppp2, &ppp2_size, &ppp2_cap);
                 out_buf_write(out_buf, ppp2, ppp2_size);
                 free(ppp2);
-                pkt[0] = 2; //configure-ack
+                ppp[4] = ip_nak ? 3 : 2; //configure-nak or configure-ack
             }
             ppp_crc_fix(ppp, ppp_size);
             ppp = escape_ppp(ppp, &ppp_size, &ppp_cap);
