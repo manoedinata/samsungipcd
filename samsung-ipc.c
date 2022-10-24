@@ -20,12 +20,14 @@ You should have received a copy of the GNU General Public License along with thi
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <netpacket/packet.h>
 #include <net/if.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include "modem.h"
 
 #define INTERFACE_NAME "rmnet0"
@@ -56,9 +58,14 @@ static void start_voicecall(void)
     pid_t voicecall_pid = fork();
     if(voicecall_pid == 0)
     {
+        voicecall_pid = fork();
+        if(!voicecall_pid)
+            _exit(0);
+        else if(voicecall_pid < 0)
+            _exit(127);
         dup2(pp[0], 0);
         execl(PREFIX "/libexec/samsungipcd/voicecall.sh", "voicecall.sh", NULL);
-        _exit(179);
+        _exit(127);
     }
     else if(voicecall_pid >= 0)
         voicecall_wrpipe = pp[1];
@@ -187,6 +194,7 @@ enum
     THREAD_REQ_TYPE_SMS_INCOMING,
     THREAD_REQ_TYPE_SET_GPRS,
     THREAD_REQ_TYPE_DIAL,
+    THREAD_REQ_TYPE_SET_ONLINE,
 };
 
 static uint8_t seq_cntr = 0;
@@ -283,8 +291,20 @@ static void* sipc_thread(void* arg)
                     char password[sizeof(data.password)] = {0};
                     ipc_gprs_pdp_context_request_set_setup(&data, 0, 1, username, password);
                     ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
-                    LOCKED() have_gprs = 0;
-                    modem_inet_disconnected();
+                    int old_have;
+                    LOCKED()
+                    {
+                        old_have = have_gprs;
+                        have_gprs = 0;
+                    }
+                    if(old_have)
+                    {
+                        struct thread_req* req = malloc(sizeof(*req));
+                        req->type = THREAD_REQ_TYPE_SET_GPRS;
+                        req->ptr = NULL;
+                        req->size = 0;
+                        write(thread_comm[1], &req, sizeof(req));
+                    }
                 }
             }
             else if(ptr->type == THREAD_REQ_TYPE_DIAL)
@@ -314,6 +334,19 @@ static void* sipc_thread(void* arg)
                     call_state = -1;
                     call_direction = -1;
                 }
+            }
+            else if(ptr->type == THREAD_REQ_TYPE_SET_ONLINE)
+            {
+                if(ptr->size == 1)
+                {
+                    ipc_client_send(fmt, seq_cntr++, IPC_PWR_PHONE_PWR_UP, IPC_TYPE_EXEC, NULL, 0);
+                    struct ipc_pwr_phone_state_request_data data = {
+                        .state = IPC_PWR_PHONE_STATE_REQUEST_NORMAL,
+                    };
+                    ipc_client_send(fmt, seq_cntr++, IPC_PWR_PHONE_STATE, IPC_TYPE_EXEC, &data, sizeof(data));
+                }
+                else
+                    ipc_client_send(fmt, seq_cntr++, IPC_PWR_PHONE_PWR_OFF, IPC_TYPE_EXEC, NULL, 0);
             }
             free(ptr);
         }
@@ -504,6 +537,19 @@ static int open_packet(void)
 
 int modem_init(void)
 {
+    pid_t p = fork();
+    if(!p)
+    {
+        execl(PREFIX "/libexec/samsungipcd/init.sh", "init.sh", NULL);
+        if(errno == ENOENT)
+            _exit(0); //OK if the script is missing
+        _exit(127);
+    }
+    if(p < 0)
+        return -1;
+    int status;
+    if(waitpid(p, &status, 0) != p || status)
+        return -1;
     rmnet_fd = open_rmnet();
     if(rmnet_fd < 0)
         return -1;
@@ -581,6 +627,8 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
                 modem_call_remote_hangup();
             }
         }
+        else if(cmd->type == THREAD_REQ_TYPE_SET_GPRS && !cmd->size)
+            modem_inet_disconnected();
         free(cmd);
     }
     return 0;
@@ -611,16 +659,33 @@ const char* modem_conf_get_serial(void) //XXX
     return "dummy";
 }
 
-static int dummy_online = 0;
+static int online_status = 0;
 
-int modem_conf_is_online(void) //XXX
+int modem_conf_is_online(void)
 {
-    return dummy_online;
+    return online_status;
 }
 
-int modem_conf_set_online(int is_online) //XXX
+int modem_conf_set_online(int is_online)
 {
-    dummy_online = is_online;
+    if(online_status && !is_online)
+    {
+        int old_have;
+        LOCKED()
+        {
+            old_have = have_gprs;
+            have_gprs = 0;
+        }
+        if(old_have)
+            modem_inet_disconnected();
+    }
+    struct thread_req* req = malloc(sizeof(*req));
+    req->type = THREAD_REQ_TYPE_SET_ONLINE;
+    req->ptr = NULL;
+    req->size = is_online;
+    if(write(thread_comm[0], &req, sizeof(req)) != sizeof(req))
+        return -1;
+    online_status = is_online;
     return 0;
 }
 
