@@ -130,6 +130,21 @@ static int format_clcc_or_ecav(char** msg, const char* which)
         ); //TODO: string escape
 }
 
+static int format_ccwa(char** msg)
+{
+    *msg = NULL;
+    const char* number;
+    int state;
+    int direction;
+    if(!modem_call_get_info(&number, &state, &direction))
+        return 0;
+    else
+        return asprintf(msg, "\r\n+CCWA: \"%s\",%d,1\r\n",
+            number ? number : "",
+            (number && number[0] == '+') ? 145 : 129
+        ); //TODO: string escape
+}
+
 struct conn_status
 {
     int is_gprs;
@@ -162,6 +177,7 @@ static int unescape_ppp(char* ppp, size_t* p_sz)
 static char* escape_ppp(char* ppp, size_t* p_sz, size_t* p_cap)
 {
 #ifdef PPP_DUMP
+#warning "PPP dumping enabled. This is a debug feature, do not use in production."
     char* ppp3 = malloc(*p_sz);
     memcpy(ppp3, ppp, *p_sz);
     printf("Escaping PPP:");
@@ -289,11 +305,13 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
                 escape_ppp(buf, &sz, &cap);
                 out_buf_write(out_buf, buf, sz);
             }
-            if(protocol == 0xc021)
-            {
-                free(ppp);
-                return 1;
-            }
+            free(ppp);
+            return 1;
+        }
+        else if(pkt[0] == 6) //terminate-ack
+        {
+            free(ppp);
+            return 1;
         }
     }
     else if(protocol == 0xc023 /* PAP */)
@@ -354,6 +372,12 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             free(ppp);
             return 0;
         }
+#ifdef PPP_DUMP
+        printf("IPCP configuration:\n");
+        printf("Local IP: %hhu.%hhu.%hhu.%hhu\n", local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
+        printf("DNS1: %hhu.%hhu.%hhu.%hhu\n", dns1[0], local_ip[1], local_ip[2], local_ip[3]);
+        printf("DNS2: %hhu.%hhu.%hhu.%hhu\n", dns2[0], local_ip[1], local_ip[2], local_ip[3]);
+#endif
         if(pkt[0] == 1) //configure-request
         {
             int ip_nak = 0;
@@ -871,7 +895,12 @@ static void broadcast_notification(const char* s)
 
 void modem_call_incoming(void)
 {
+    char* msg;
+    int len = format_ccwa(&msg);
+    if(msg)
+        broadcast_notification(msg);
     broadcast_notification("\r\n+CRING: VOICE\r\n");
+    free(msg);
 }
 
 void modem_call_remote_hangup(void)

@@ -152,6 +152,7 @@ static int plmn_code = -1;
 static int rssi = 0;
 
 static int call_state;
+static int call_id;
 static int call_direction;
 static char* call_number;
 
@@ -213,6 +214,8 @@ static int ifdownup(void)
     return 0;
 }
 
+//XXX: we should not blindly trust data received from the modem
+//read-only buffer overflows still yield SIGSEGVs
 static void* sipc_thread(void* arg)
 {
     fcntl(thread_comm[1], F_SETFL, fcntl(thread_comm[1], F_GETFL) | O_NONBLOCK);
@@ -439,14 +442,44 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_GPRS_IP_CONFIGURATION)
         {
             struct ipc_gprs_ip_configuration_data* data = msg.data;
-            LOCKED()
+            /*uint8_t* ptr = data;
+            printf("packet:");
+            for(int i = 0; i < msg.size; i++)
+                printf(" %02hhx", ptr[i]);
+            printf("\n");*/
+            if((data->field_flag & 7) != 7)
             {
-                memcpy(gprs_ip, data->ip, 4);
-                memcpy(gprs_dns1, data->dns1, 4);
-                memcpy(gprs_dns2, data->dns2, 4);
-                have_gprs = 1;
+                printf("gprs_ip_configuration without data, no idea what to do\n");
+                //disconnect the modem
+                struct ipc_gprs_pdp_context_request_set_data data;
+                char username[sizeof(data.username)] = {0};
+                char password[sizeof(data.password)] = {0};
+                ipc_gprs_pdp_context_request_set_setup(&data, 0, 1, username, password);
+                ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+                need_gprs = 0;
+                LOCKED()
+                    have_gprs = 0;
+                //signal ppp disconnection
+                struct thread_req* req = malloc(sizeof(*req));
+                req->type = THREAD_REQ_TYPE_SET_GPRS;
+                req->ptr = NULL;
+                req->size = 0;
+                write(thread_comm[1], &req, sizeof(req));
             }
-            ifdownup();
+            else
+            {
+                LOCKED()
+                {
+                    memcpy(gprs_ip, data->ip, 4);
+                    memcpy(gprs_dns1, data->dns1, 4);
+                    memcpy(gprs_dns2, data->dns2, 4);
+                    /*printf("ip = 0x%x\n", *(int*)data->ip);
+                    printf("dns1 = 0x%x\n", *(int*)data->dns1);
+                    printf("dns2 = 0x%x\n", *(int*)data->dns2);*/
+                    have_gprs = 1;
+                }
+                ifdownup();
+            }
         }
         else if(msg.command == IPC_CALL_STATUS)
         {
@@ -484,9 +517,48 @@ static void* sipc_thread(void* arg)
             struct ipc_call_incoming_data* data = msg.data;
             if(data->type == IPC_CALL_TYPE_VOICE)
             {
+                call_id = data->id;
+                //ask modem for call list
+                ipc_client_send(fmt, seq_cntr++, IPC_CALL_LIST, IPC_TYPE_GET, NULL, 0);
+            }
+        }
+        else if(msg.command == IPC_CALL_LIST)
+        {
+            {
+                uint8_t* data = msg.data;
+                for(int i = 0; i < msg.size; i++)
+                    printf("%02hhx ", data[i]);
+                printf("\n");
+            }
+            struct ipc_call_list_header* h = msg.data;
+            struct ipc_call_list_entry* end = (void*)((char*)msg.data + msg.size);
+            uint8_t count = h->count;
+            struct ipc_call_list_entry* cur = (void*)(h+1);
+            int found = 0;
+            for(size_t i = 0; i < count && !found; i++)
+            {
+                char* number = (char*)(cur + 1);
+                if(cur->type == IPC_CALL_TYPE_VOICE
+                && cur->id == call_id)
+                {
+                    found = 1;
+                    char* num_alloc = malloc(cur->number_length+1);
+                    for(size_t i = 0; i < cur->number_length; i++)
+                        num_alloc[i] = number[i];
+                    num_alloc[cur->number_length] = 0;
+                    struct thread_req* req = malloc(sizeof(*req));
+                    req->type = THREAD_REQ_TYPE_DIAL;
+                    req->ptr = num_alloc;
+                    req->size = cur->number_length;
+                    write(thread_comm[1], &req, sizeof(req));
+                }
+                cur = (void*)(number + cur->number_length);
+            }
+            if(!found)
+            {
                 struct thread_req* req = malloc(sizeof(*req));
                 req->type = THREAD_REQ_TYPE_DIAL;
-                req->ptr = NULL;
+                req->ptr = 0;
                 req->size = 1;
                 write(thread_comm[1], &req, sizeof(req));
             }
@@ -613,6 +685,8 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
                 {
                     call_state = MODEM_CALL_STATE_INCOMING;
                     call_direction = MODEM_CALL_DIRECTION_INCOMING;
+                    if(cmd->ptr)
+                        update_one_owned(&call_number, cmd->ptr);
                 }
                 modem_call_incoming();
             }
