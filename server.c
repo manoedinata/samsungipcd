@@ -112,15 +112,32 @@ static int out_buf_flush(struct io_buf* b, int fd)
 #define WRITE_OK_STRING(fd, s) WRITE_STRING(fd, s "\r\nOK\r\n")
 #define WRITE_ERROR(fd) WRITE_STRING(fd, "\r\nERROR\r\n")
 
+#ifdef API_DEBUG
+
+#undef API_DEBUG
+#define API_DEBUG(...) fprintf(stderr, __VA_ARGS__)
+
+#else
+
+#define API_DEBUG(...) do {} while(0)
+
+#endif
+
 static int format_clcc_or_ecav(char** msg, const char* which)
 {
     *msg = NULL;
     const char* number;
     int state;
     int direction;
+    API_DEBUG("modem_call_get_info(...)");
     if(!modem_call_get_info(&number, &state, &direction))
+    {
+        API_DEBUG(" = 0\n");
         return 0;
+    }
     else
+    {
+        API_DEBUG(" = (\"%s\", %d, %d)\n", number ? number : "(null)", state, direction);
         return asprintf(msg, "\r\n%s: 1,%d,%d,0,0,\"%s\",%d\r\n",
             which,
             direction,
@@ -128,6 +145,7 @@ static int format_clcc_or_ecav(char** msg, const char* which)
             number ? number : "",
             (number && number[0] == '+') ? 145 : 129
         ); //TODO: string escape
+    }
 }
 
 static int format_ccwa(char** msg)
@@ -145,9 +163,11 @@ static int format_ccwa(char** msg)
         ); //TODO: string escape
 }
 
+int n_total = 0;
+int n_ppp = 0;
+
 struct conn_status
 {
-    int is_gprs;
     int operator_format;
     int want_pdu;
     int sms_nr;
@@ -344,13 +364,18 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             return 0;
         }
         pkt[pszp] = pkt[totalsz] = 0;
+        API_DEBUG("modem_inet_set_username_password(\"%s\", \"%s\")", pkt+5, pkt+pszp+1);
         if(!modem_inet_set_username_password(pkt+5, pkt+pszp+1))
         {
+            API_DEBUG(" = 0 (OK)\n");
             pkt[0] = 2;
             modem_inet_set_enabled(1);
         }
         else
+        {
+            API_DEBUG(" = ERROR\n");
             pkt[0] = 3;
+        }
         pkt[2] = 0;
         pkt[3] = 5;
         pkt[4] = 0;
@@ -367,16 +392,21 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             return 0;
         }
         char local_ip[4], dns1[4], dns2[4];
+        API_DEBUG("modem_inet_get_ipv4_addresses(...)");
         if(modem_inet_get_ipv4_addresses(local_ip, dns1, dns2))
         {
+            API_DEBUG(" = ERROR\n");
             free(ppp);
             return 0;
         }
-#ifdef PPP_DUMP
-        printf("IPCP configuration:\n");
-        printf("Local IP: %hhu.%hhu.%hhu.%hhu\n", local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
-        printf("DNS1: %hhu.%hhu.%hhu.%hhu\n", dns1[0], local_ip[1], local_ip[2], local_ip[3]);
-        printf("DNS2: %hhu.%hhu.%hhu.%hhu\n", dns2[0], local_ip[1], local_ip[2], local_ip[3]);
+#ifdef API_DEBUG
+        API_DEBUG(" = 0 (OK)\n");
+#endif
+#if defined(PPP_DUMP) || defined(API_DEBUG)
+        fprintf(stderr, "IPCP configuration:\n");
+        fprintf(stderr, "Local IP: %hhu.%hhu.%hhu.%hhu\n", local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
+        fprintf(stderr, "DNS1: %hhu.%hhu.%hhu.%hhu\n", dns1[0], local_ip[1], local_ip[2], local_ip[3]);
+        fprintf(stderr, "DNS2: %hhu.%hhu.%hhu.%hhu\n", dns2[0], local_ip[1], local_ip[2], local_ip[3]);
 #endif
         if(pkt[0] == 1) //configure-request
         {
@@ -474,6 +504,7 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
         size_t sz = (uint16_t)(uint8_t)pkt[2] << 8 | (uint8_t)pkt[3];
         if(sz > pkt_size)
             sz = pkt_size;
+        API_DEBUG("modem_inet_send_packet(%d, %p, %zd)\n", protocol, pkt, sz);
         modem_inet_send_packet(protocol, pkt, sz);
     }
     else
@@ -506,7 +537,10 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
         if(st->is_ppp)
         {
             if(handle_ppp(out_buf, ppp, ppp_size))
+            {
                 st->is_ppp = 0;
+                n_ppp--;
+            }
             continue;
         }
         else if(st->want_pdu)
@@ -533,7 +567,17 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             if(l % 2 == 0)
             {
                 l /= 2;
+#ifdef API_DEBUG
+                API_DEBUG("modem_sms_send_pdu(\"");
+                for(size_t i = 0; i < l; i++)
+                    API_DEBUG("\\x%02hhx", pdu[i]);
+                API_DEBUG(", %zd)", l);
+#endif
                 l = modem_sms_send_pdu(pdu, l) ? 1 : 0;
+                if(l)
+                    API_DEBUG(" = ERROR\n");
+                else
+                    API_DEBUG(" = 0 (OK)\n");
             }
             if(l % 2 == 0)
             {
@@ -563,7 +607,9 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             WRITE_OK(out_buf);
         else if(!strcmp(cmd, "ATI") || !strcmp(cmd, "AT+CGMM") || !strcmp(cmd, "AT+GMM"))
         {
+            API_DEBUG("modem_conf_get_name(%d)", !strcmp(cmd, "ATI"));
             const char* idstr = modem_conf_get_name(!strcmp(cmd, "ATI"));
+            API_DEBUG(" = \"%s\"\n", idstr ? idstr : "(null)");
             char* buf = NULL;
             int len = asprintf(&buf, "\r\n%s\r\n\r\nOK\r\n", idstr);
             out_buf_write(out_buf, buf, len);
@@ -573,7 +619,9 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             WRITE_OK_STRING(out_buf, "0.1");
         else if(!strcmp(cmd, "AT+CGSN") || !strcmp(cmd, "AT+GSN"))
         {
+            API_DEBUG("modem_conf_get_serial()");
             const char* serial = modem_conf_get_serial();
+            API_DEBUG(" = \"%s\"\n", serial ? serial : "(null)");
             char* buf = NULL;
             int len = asprintf(&buf, "\r\n%s\r\n\r\nOK\r\n", serial);
             out_buf_write(out_buf, buf, len);
@@ -587,44 +635,55 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             WRITE_OK_STRING(out_buf, "\r\n246813579\r\n"); //TODO: stub
         else if(!strcmp(cmd, "AT+CREG?") || !strcmp(cmd, "AT+CGREG?"))
         {
+            API_DEBUG("modem_registration_get_status()");
             int state = modem_registration_get_status();
+            API_DEBUG(" = %d\n", state);
             char* buf = NULL;
             int len = asprintf(&buf, "\r\n+CREG: 1,%d\r\n\r\nOK\r\n", state);
             out_buf_write(out_buf, buf, len);
             free(buf);
         }
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CSMS?"))
+        else if(!strcmp(cmd, "AT+CSMS?"))
             WRITE_OK_STRING(out_buf, "\r\n+CSMS: 0,1,1,0\r\n");
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CSMS=?"))
+        else if(!strcmp(cmd, "AT+CSMS=?"))
             WRITE_OK_STRING(out_buf, "\r\n0\r\n");
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CSMS=0"))
+        else if(!strcmp(cmd, "AT+CSMS=0"))
             WRITE_OK_STRING(out_buf, "\r\n+CSMS: 1,1,0\r\n");
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CMGF=?"))
+        else if(!strcmp(cmd, "AT+CMGF=?"))
             WRITE_OK_STRING(out_buf, "\r\n+CMGF: (0)\r\n");
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CMGF=0"))
+        else if(!strcmp(cmd, "AT+CMGF=0"))
             WRITE_OK(out_buf);
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CPMS=?"))
+        else if(!strcmp(cmd, "AT+CPMS=?"))
             WRITE_OK_STRING(out_buf, "\r\n+CPMS: (\"SM\",\"ME\"),(\"SM\",\"ME\"),(\"SM\",\"ME\")\r\n");
-        else if(!st->is_gprs && !strncmp(cmd, "AT+CPMS=", 8))
+        else if(!strncmp(cmd, "AT+CPMS=", 8))
             WRITE_OK(out_buf);
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CNMI=?"))
+        else if(!strcmp(cmd, "AT+CNMI=?"))
             WRITE_OK_STRING(out_buf, "\r\n+CNMI: (2),(1),(2),(1),(0)\r\n");
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CNMI=2,1,2,1,0"))
+        else if(!strcmp(cmd, "AT+CNMI=2,1,2,1,0"))
             WRITE_OK(out_buf);
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CMGL=4")) //TODO: stub
+        else if(!strcmp(cmd, "AT+CMGL=4")) //TODO: stub
             WRITE_OK(out_buf);
-        else if(!st->is_gprs && !strncmp(cmd, "AT+CGSMS=", 9)) //???
+        else if(!strncmp(cmd, "AT+CGSMS=", 9)) //???
             WRITE_OK(out_buf);
         else if(!strncmp(cmd, "AT+CFUN=", 8))
         {
+            API_DEBUG("modem_conf_set_online(%d)", atoi(cmd+8));
             if(!modem_conf_set_online(atoi(cmd+8)))
+            {
+                API_DEBUG(" = 0 (OK)\n");
                 WRITE_OK(out_buf);
+            }
             else
+            {
+                API_DEBUG(" = ERROR\n");
                 WRITE_ERROR(out_buf);
+            }
         }
         else if(!strcmp(cmd, "AT+CFUN?"))
         {
+            API_DEBUG("modem_conf_is_online()");
             int q = modem_conf_is_online();
+            API_DEBUG(" = %d\n", q);
             char* buf = NULL;
             int len = asprintf(&buf, "\r\n+CFUN: %d\r\n\r\nOK\r\n\r\n", q?1:0);
             out_buf_write(out_buf, buf, len);
@@ -632,10 +691,14 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
         }
         else if(!strcmp(cmd, "AT+CRSM=176,12258,0,0,10")) //TODO: stub
             WRITE_OK_STRING(out_buf, "\r\n+CRSM: 159,10,989422024754212460F6\r\n");
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CSQ"))
+        else if(!strcmp(cmd, "AT+CSQ"))
         {
+            API_DEBUG("modem_registration_get_rssi()");
             int rssi = modem_registration_get_rssi();
+            API_DEBUG(" = %d\n", rssi);
+            API_DEBUG("modem_registration_get_error_rate()");
             double error_rate = modem_registration_get_error_rate();
+            API_DEBUG(" = %lf\n", error_rate);
             if(rssi == 0)
                 rssi = 99;
             else if(rssi <= -113)
@@ -668,7 +731,7 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             out_buf_write(out_buf, msg, len);
             free(msg);
         }
-        else if(!st->is_gprs && !strncmp(cmd, "AT+COPS=", 8))
+        else if(!strncmp(cmd, "AT+COPS=", 8))
         {
             char* ops = cmd + 8;
             char* colon = strchr(ops, ',');
@@ -682,22 +745,27 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
                 if(colon)
                     *colon = 0;
                 int format = atoi(ops);
-                st->operator_format = format;
+                if(mode == 3)
+                    st->operator_format = format;
             }
-            if(mode != 3)
+            if(mode != 0 && mode != 3)
                 WRITE_ERROR(out_buf);
             else
                 WRITE_OK(out_buf);
         }
-        else if(!st->is_gprs && !strcmp(cmd, "AT+COPS?"))
+        else if(!strcmp(cmd, "AT+COPS?"))
         {
+            API_DEBUG("modem_registration_get_mode()");
             int mode = modem_registration_get_mode();
+            API_DEBUG(" = %d\n", mode);
             int format = st->operator_format;
             char* msg = NULL;
             int len;
             if(format < 2)
             {
+                API_DEBUG("modem_registration_get_operator_name(%d)", format);
                 const char* oper = modem_registration_get_operator_name(format);
+                API_DEBUG(" = \"%s\"\n", oper ? oper : "(null)");
                 if(mode >= 0 && oper)
                     len = asprintf(&msg, "\r\n+COPS: %d,%d,\"%s\"\r\n\r\nOK\r\n\r\n",
                         mode,
@@ -709,7 +777,9 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             }
             else if(format == 2)
             {
+                API_DEBUG("modem_registration_get_operator_code()");
                 int oper = modem_registration_get_operator_code();
+                API_DEBUG(" = %d\n", oper);
                 if(mode >= 0 && oper >= 0)
                     len = asprintf(&msg, "\r\n+COPS: %d,%d,%d\r\n\r\nOK\r\n\r\n",
                         mode,
@@ -727,30 +797,46 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
                 free(msg);
             }
         }
-        else if(st->is_gprs && !strcmp(cmd, "ATD*99***1#"))
+        else if(!strcmp(cmd, "ATD*99***1#") && n_ppp < n_total)
         {
             WRITE_OK(out_buf);
             st->is_ppp = 1;
+            //if we got here, we clearly weren't in PPP mode before
+            n_ppp++;
         }
-        else if(!st->is_gprs && !strncmp(cmd, "ATD", 3))
+        else if(!strncmp(cmd, "ATD", 3))
         {
             char* number = cmd + 3;
             char* sc = strchr(number, ';');
             if(sc)
                 *sc = 0;
+            API_DEBUG("modem_call_dial(\"%s\")", number);
             if(!modem_call_dial(number))
+            {
+                API_DEBUG(" = 0 (OK)\n");
                 WRITE_OK(out_buf);
+            }
             else
+            {
+                API_DEBUG(" = ERROR\n");
                 WRITE_ERROR(out_buf);
+            }
         }
-        else if(!st->is_gprs && !strcmp(cmd, "ATA"))
+        else if(!strcmp(cmd, "ATA"))
         {
+            API_DEBUG("modem_call_answer()");
             if(!modem_call_answer())
+            {
+                API_DEBUG(" = 0 (OK)\n");
                 WRITE_OK(out_buf);
+            }
             else
+            {
+                API_DEBUG(" = ERROR\n");
                 WRITE_ERROR(out_buf);
+            }
         }
-        else if(!st->is_gprs && (!strcmp(cmd, "ATH") || !strcmp(cmd, "AT+CLCC")))
+        else if(!strcmp(cmd, "ATH") || !strcmp(cmd, "AT+CLCC"))
         {
             char* msg;
             int len = format_clcc_or_ecav(&msg, "+CLCC");
@@ -758,27 +844,41 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             WRITE_OK(out_buf);
             free(msg);
         }
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CLCC=?"))
+        else if(!strcmp(cmd, "AT+CLCC=?"))
             WRITE_OK(out_buf);
-        else if(!st->is_gprs && !strcmp(cmd, "AT+CHUP"))
+        else if(!strcmp(cmd, "AT+CHUP"))
         {
+            API_DEBUG("modem_call_hangup()");
             if(!modem_call_hangup())
+            {
+                API_DEBUG(" = 0 (OK)\n");
                 WRITE_OK(out_buf);
+            }
             else
+            {
+                API_DEBUG(" = ERROR\n");
                 WRITE_ERROR(out_buf);
+            }
         }
-        else if(!st->is_gprs && !strncmp(cmd, "AT+CMGS=", 8))
+        else if(!strncmp(cmd, "AT+CMGS=", 8))
         {
             out_buf_write(out_buf, "\r\n>", 3);
             st->want_pdu = 1;
         }
-        else if(!st->is_gprs && !strncmp(cmd, "AT+CMGR=", 8))
+        else if(!strncmp(cmd, "AT+CMGR=", 8))
         {
             int idx = atoi(cmd+8);
             size_t pdu_size = 0;
             const char* pdu = NULL;
+            API_DEBUG("modem_sms_get_incoming_pdu(%d, ", idx);
             if(modem_sms_get_incoming_pdu(idx, &pdu, &pdu_size))
             {
+                API_DEBUG(", ...) = (\"");
+#ifdef API_DEBUG
+                for(size_t i = 0; i < pdu_size; i++)
+                    API_DEBUG("\\x%02hhx", pdu[i]);
+#endif
+                API_DEBUG("\", %zd)\n", pdu_size);
                 char* buf = NULL;
                 int len = asprintf(&buf, "\r\n+CMGR: 0,alpha,%zd\r\n", pdu_size);
                 out_buf_write(out_buf, buf, len);
@@ -794,27 +894,36 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             else
                 WRITE_ERROR(out_buf);
         }
-        else if(st->is_gprs && !strncmp(cmd, "ATX", 3))
+        else if(!strncmp(cmd, "ATX", 3))
             WRITE_OK(out_buf);
         else if(!strncmp(cmd, "ATZ", 3))
             WRITE_OK(out_buf);
-        else if(st->is_gprs && !strcmp(cmd, "AT+CGDCONT=?"))
+        else if(!strcmp(cmd, "AT+CGDCONT=?"))
             WRITE_OK_STRING(out_buf, "\r\n+CGDCONT: (1),\"IP\",,,(0),(0)\r\n");
-        else if(st->is_gprs && !strncmp(cmd, "AT+CGDCONT=1,\"IP\",\"", 19))
+        else if(!strncmp(cmd, "AT+CGDCONT=1,\"IP\",\"", 19))
         {
             //TODO: string unescape
             char* apn = cmd+19;
             char* quote = strchr(apn, '"');
             if(quote)
                 *quote = 0;
+            API_DEBUG("modem_inet_set_apn(\"%s\")", apn);
             if(!modem_inet_set_apn(apn))
+            {
+                API_DEBUG(" = 0 (OK)\n");
                 WRITE_OK(out_buf);
+            }
             else
+            {
+                API_DEBUG(" = ERROR\n");
                 WRITE_ERROR(out_buf);
+            }
         }
-        else if(st->is_gprs && !strcmp(cmd, "AT+CGDCONT?"))
+        else if(!strcmp(cmd, "AT+CGDCONT?"))
         {
+            API_DEBUG("modem_inet_get_apn()");
             const char* apn = modem_inet_get_apn();
+            API_DEBUG(" = \"%s\"\n", apn ? apn : "(null)");
             if(!apn)
                 WRITE_ERROR(out_buf);
             else
@@ -826,7 +935,7 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
                 free(msg);
             }
         }
-        else if(st->is_gprs && !strncmp(cmd, "AT+CGACT=", 9))
+        else if(!strncmp(cmd, "AT+CGACT=", 9))
         {
             char* q = cmd + 10;
             char* comma = strchr(q, ',');
@@ -834,10 +943,18 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             int state = atoi(q);
             q = comma + 1;
             int which = atoi(q);
+            if(which == 1)
+                API_DEBUG("modem_inet_set_enabled(%d)\n", state);
             if(which == 1 && !modem_inet_set_enabled(state))
+            {
+                API_DEBUG(" = 0 (OK)\n");
                 WRITE_OK(out_buf);
+            }
             else
+            {
+                API_DEBUG(" = ERROR\n");
                 WRITE_ERROR(out_buf);
+            }
         }
         else
             WRITE_ERROR(out_buf);
@@ -895,6 +1012,7 @@ static void broadcast_notification(const char* s)
 
 void modem_call_incoming(void)
 {
+    API_DEBUG("callback: modem_call_incoming()\n");
     char* msg;
     int len = format_ccwa(&msg);
     if(msg)
@@ -905,11 +1023,13 @@ void modem_call_incoming(void)
 
 void modem_call_remote_hangup(void)
 {
+    API_DEBUG("callback: modem_call_remote_hangup()\n");
     broadcast_notification("\r\nNO CARRIER\r\n");
 }
 
 void modem_sms_incoming(int index)
 {
+    API_DEBUG("callback: modem_sms_incoming(%d)\n", index);
     char* msg = NULL;
     int len = asprintf(&msg, "\r\n+CMTI: \"ME\",%d\r\n", index);
     broadcast_notification(msg);
@@ -918,6 +1038,7 @@ void modem_sms_incoming(int index)
 
 void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz)
 {
+    API_DEBUG("callback: modem_inet_incoming_packet(%d, %p, %zd)\n", protocol, pkt, sz);
     size_t ppp_sz = sz+6;
     size_t ppp_cap = 2*ppp_sz;
     char* ppp_pkt = malloc(ppp_cap);
@@ -936,6 +1057,7 @@ void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz)
 
 void modem_inet_disconnected(void)
 {
+    API_DEBUG("callback: modem_inet_disconnected()\n");
     char ppp[32] = {0xff, 0x03, 0xc0, 0x21, 0x05, 0x00, 0x00, 0x04};
     size_t ppp_size = 10;
     size_t ppp_cap = 32;
@@ -949,7 +1071,7 @@ void modem_inet_disconnected(void)
         }
 }
 
-static int open_pty(const char* path, struct modem_fd_set* rdsocks, int is_gprs)
+static int open_pty(const char* path, struct modem_fd_set* rdsocks)
 {
     int fd = open(path, O_RDWR | O_NOCTTY);
     if(fd < 0)
@@ -969,10 +1091,24 @@ static int open_pty(const char* path, struct modem_fd_set* rdsocks, int is_gprs)
     struct client_conn* conn = malloc(sizeof(*conn));
     memset(conn, 0, sizeof(*conn));
     conn->fd = fd;
-    conn->status.is_gprs = is_gprs;
     connections[fd] = conn;
     modem_poll_fd_set(fd, rdsocks);
+    n_total++;
+    //we start in non-PPP mode, do not increment n_ppp here
     return fd;
+}
+
+static void conn_close(struct client_conn* conn)
+{
+    //we might've died while in PPP mode
+    if(conn->fd >= 0)
+        close(conn->fd);
+    if(conn->status.is_ppp)
+        n_ppp--;
+    free(conn->in_buf.data);
+    free(conn->out_buf.data);
+    free(conn);
+    n_total--;
 }
 
 int main(int argc, const char** argv)
@@ -989,18 +1125,21 @@ int main(int argc, const char** argv)
     rdsocks.maxfd = -1;
     FD_ZERO(&wrsocks.set);
     wrsocks.maxfd = -1;
+    API_DEBUG("modem_init()");
     if(modem_init())
     {
+        API_DEBUG(" = ERROR\n");
         fprintf(stderr, "modem init failed\n");
         return 1;
     }
-    int pty_fd = open_pty(pty_path, &rdsocks, 0);
+    API_DEBUG(" = 0 (OK)\n");
+    int pty_fd = open_pty(pty_path, &rdsocks);
     if(pty_fd < 0)
     {
         fprintf(stderr, "open(pty_path) failed\n");
         return 1;
     }
-    int pty2_fd = open_pty(pty2_path, &rdsocks, 1);
+    int pty2_fd = open_pty(pty2_path, &rdsocks);
     if(pty2_fd < 0)
     {
         fprintf(stderr, "open(pty2_path) failed\n");
@@ -1038,9 +1177,7 @@ int main(int argc, const char** argv)
                 poll_at_commands(&conn->in_buf, &conn->out_buf, &conn->status);
                 if(conn->fd < 0)
                 {
-                    free(conn->in_buf.data);
-                    free(conn->out_buf.data);
-                    free(conn);
+                    conn_close(conn);
 #if 0
                     if(i == pty_fd)
                     {
@@ -1080,10 +1217,7 @@ int main(int argc, const char** argv)
                     connections[conn->fd] = NULL;
                     modem_poll_fd_clr(conn->fd, &rdsocks);
                     modem_poll_fd_clr(conn->fd, &wrsocks);
-                    close(conn->fd);
-                    free(conn->in_buf.data);
-                    free(conn->out_buf.data);
-                    free(conn);
+                    conn_close(conn);
                 }
                 else if(conn->out_buf.sz)
                     modem_poll_fd_set(conn->fd, &wrsocks);
