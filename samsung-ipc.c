@@ -319,7 +319,7 @@ static void* sipc_thread(void* arg)
                         .type = IPC_CALL_TYPE_VOICE,
                         .identity = IPC_CALL_IDENTITY_DEFAULT,
                         .number_length = strlen(number),
-                        .prefix = IPC_CALL_PREFIX_NONE,
+                        .prefix = (*number == '+') ? IPC_CALL_PREFIX_INTL : IPC_CALL_PREFIX_NONE,
                     };
                     strncpy(data.number, number, sizeof(data.number));
                     ipc_client_send(fmt, seq_cntr++, IPC_CALL_OUTGOING, IPC_TYPE_EXEC, &data, sizeof(data));
