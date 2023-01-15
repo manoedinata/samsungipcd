@@ -639,7 +639,8 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
             int state = modem_registration_get_status();
             API_DEBUG(" = %d\n", state);
             char* buf = NULL;
-            int len = asprintf(&buf, "\r\n+CREG: 1,%d\r\n\r\nOK\r\n", state);
+            *strchr(cmd, '?') = 0;
+            int len = asprintf(&buf, "\r\n+%s: 1,%d\r\n\r\nOK\r\n", cmd+3, state);
             out_buf_write(out_buf, buf, len);
             free(buf);
         }

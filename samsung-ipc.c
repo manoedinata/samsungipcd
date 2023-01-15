@@ -223,8 +223,10 @@ static void* sipc_thread(void* arg)
     struct ipc_client* rfs = ipc_client_create(IPC_CLIENT_TYPE_RFS);
     ipc_client_data_create(fmt);
     ipc_client_data_create(rfs);
+#ifndef API_DEBUG //avoid polluting the output
     ipc_client_log_callback_register(fmt, log_callback, NULL);
     ipc_client_log_callback_register(rfs, log_callback, NULL);
+#endif
     int ans = 0;
     if(ipc_client_boot(fmt)
     || ipc_client_open(fmt)
