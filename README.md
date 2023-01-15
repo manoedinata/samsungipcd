@@ -13,13 +13,11 @@ This is a proxy that provides standard AT command interface to Samsung modems us
 ## Unimplemented
 
 * Call volume control
+* Putting calls on hold, having multiple simultaneous calls
+* Automatic detection of GPRS connection details
 * DTMF tones (in-call number keyboard)
 * USSD codes (pseudo-numbers with textual answers)
 * SIM unlocking
-
-## Won't work (AT limitations)
-
-* Muting microphone in voice calls
 
 ## Building
 
