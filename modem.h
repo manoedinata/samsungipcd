@@ -76,6 +76,10 @@ int modem_registration_get_status(void);
 int modem_registration_get_rssi(void); //0 for unknown
 double modem_registration_get_error_rate(void); //-1 for unknown
 
+/* registration-related callbacks */
+
+void modem_registration_status_update(void);
+
 /* calls */
 int modem_call_dial(const char* number);
 int modem_call_get_info(const char** number, int* state, int* direction); //bool whether the call exists
@@ -107,3 +111,7 @@ void modem_inet_disconnected(void);
 
 /* utility */
 uint16_t ppp_crc(const char* data, size_t size);
+
+/* debug */
+
+void modem_debug(int key, int value); //ifdef DEBUG_COMMAND

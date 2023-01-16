@@ -164,6 +164,7 @@ int modem_conf_set_online(int online)
         is_online = 0;
     }
     fflush(stdout);
+    modem_registration_status_update();
     return 0;
 }
 

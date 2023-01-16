@@ -957,6 +957,32 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
                 WRITE_ERROR(out_buf);
             }
         }
+#ifdef DEBUG_COMMAND
+        else if(!strncmp(cmd, "AT+DEBUG=", 9))
+        {
+            char* cur = cmd+9;
+            for(;;)
+            {
+                char* comma = strchr(cur, ',');
+                if(comma)
+                    *comma = 0;
+                char* sc = strchr(cur, ':');
+                int v = 0;
+                if(sc)
+                {
+                    *sc = 0;
+                    v = atoi(sc+1);
+                }
+                int k = atoi(cur);
+                modem_debug(k, v);
+                if(comma)
+                    cur = comma + 1;
+                else
+                    break;
+            }
+            WRITE_OK(out_buf);
+        }
+#endif
         else
             WRITE_ERROR(out_buf);
         free(cmd);
@@ -1070,6 +1096,17 @@ void modem_inet_disconnected(void)
             out_buf_write(&connections[i]->out_buf, ppp, ppp_size);
             modem_poll_fd_set(i, &wrsocks);
         }
+}
+
+void modem_registration_status_update(void)
+{
+    API_DEBUG("modem_registration_get_status()");
+    int state = modem_registration_get_status();
+    API_DEBUG(" = %d\n", state);
+    char* buf = NULL;
+    int len = asprintf(&buf, "\r\n+CGREG: 1,%d\r\n\r\nOK\r\n", state);
+    broadcast_notification(buf);
+    free(buf);
 }
 
 static int open_pty(const char* path, struct modem_fd_set* rdsocks)

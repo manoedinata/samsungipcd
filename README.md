@@ -14,7 +14,7 @@ This is a proxy that provides standard AT command interface to Samsung modems us
 
 * Call volume control
 * Putting calls on hold, having multiple simultaneous calls
-* Automatic detection of GPRS connection details
+* Automatic detection of GPRS connection details (Does libsamsung-ipc support that at all? Needs research)
 * DTMF tones (in-call number keyboard)
 * USSD codes (pseudo-numbers with textual answers)
 * SIM unlocking

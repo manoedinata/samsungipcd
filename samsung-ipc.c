@@ -196,6 +196,10 @@ enum
     THREAD_REQ_TYPE_SET_GPRS,
     THREAD_REQ_TYPE_DIAL,
     THREAD_REQ_TYPE_SET_ONLINE,
+    THREAD_REQ_TYPE_REGIST,
+#ifdef DEBUG_COMMAND
+    THREAD_REQ_TYPE_DEBUG,
+#endif
 };
 
 static uint8_t seq_cntr = 0;
@@ -213,6 +217,13 @@ static int ifdownup(void)
         return -1;
     return 0;
 }
+
+static const int channel_volumes[4][2] = {
+    {IPC_SND_VOLUME_TYPE_VOICE, 0},
+    {IPC_SND_VOLUME_TYPE_SPEAKER, 100},
+    {IPC_SND_VOLUME_TYPE_HEADSET, 0},
+    {IPC_SND_VOLUME_TYPE_BTVOICE, 0},
+};
 
 //XXX: we should not blindly trust data received from the modem
 //read-only buffer overflows still yield SIGSEGVs
@@ -326,10 +337,26 @@ static void* sipc_thread(void* arg)
                     strncpy(data.number, number, sizeof(data.number));
                     ipc_client_send(fmt, seq_cntr++, IPC_CALL_OUTGOING, IPC_TYPE_EXEC, &data, sizeof(data));
                     free(number);
+                    for(int i = 0; i < 4; i++)
+                    {
+                        struct ipc_snd_spkr_volume_ctrl_data ctrl = {
+                            .type = channel_volumes[i][0],
+                            .volume= channel_volumes[i][1],
+                        };
+                        ipc_client_send(fmt, seq_cntr++, IPC_SND_SPKR_VOLUME_CTRL, IPC_TYPE_SET, &ctrl, sizeof(ctrl));
+                    }
                 }
                 else if(ptr->size)
                 {
                     ipc_client_send(fmt, seq_cntr++, IPC_CALL_ANSWER, IPC_TYPE_EXEC, NULL, 0);
+                    for(int i = 0; i < 4; i++)
+                    {
+                        struct ipc_snd_spkr_volume_ctrl_data ctrl = {
+                            .type = channel_volumes[i][0],
+                            .volume= channel_volumes[i][1],
+                        };
+                        ipc_client_send(fmt, seq_cntr++, IPC_SND_SPKR_VOLUME_CTRL, IPC_TYPE_SET, &ctrl, sizeof(ctrl));
+                    }
                     start_voicecall();
                 }
                 else
@@ -353,6 +380,12 @@ static void* sipc_thread(void* arg)
                 else
                     ipc_client_send(fmt, seq_cntr++, IPC_PWR_PHONE_PWR_OFF, IPC_TYPE_EXEC, NULL, 0);
             }
+#ifdef DEBUG_COMMAND
+            else if(ptr->type == THREAD_REQ_TYPE_DEBUG)
+            {
+                //...
+            }
+#endif
             free(ptr);
         }
         struct ipc_message msg;
@@ -369,6 +402,11 @@ static void* sipc_thread(void* arg)
                     rssi = 0;
                 printf("net_status = %d\n", net_status);
             }
+            struct thread_req* req = malloc(sizeof(*req));
+            req->type = THREAD_REQ_TYPE_REGIST;
+            req->ptr = NULL;
+            req->size = 0;
+            write(thread_comm[1], &req, sizeof(req));
         }
         else if(msg.command == IPC_NET_SERVING_NETWORK)
         {
@@ -379,6 +417,11 @@ static void* sipc_thread(void* arg)
                 plmn_code = atoi(plmn);
                 printf("PLMN = %d\n", plmn_code);
             }
+            struct thread_req* req = malloc(sizeof(*req));
+            req->type = THREAD_REQ_TYPE_REGIST;
+            req->ptr = NULL;
+            req->size = 0;
+            write(thread_comm[1], &req, sizeof(req));
         }
         else if(msg.command == IPC_DISP_RSSI_INFO)
         {
@@ -705,6 +748,8 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
         }
         else if(cmd->type == THREAD_REQ_TYPE_SET_GPRS && !cmd->size)
             modem_inet_disconnected();
+        else if(cmd->type == THREAD_REQ_TYPE_REGIST)
+            modem_registration_status_update();
         free(cmd);
     }
     return 0;
@@ -943,3 +988,14 @@ int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
     else
         return -1;
 }
+
+#ifdef DEBUG_COMMAND
+void modem_debug(int k, int v)
+{
+    struct thread_req* req = malloc(sizeof(*req));
+    req->type = THREAD_REQ_TYPE_DEBUG;
+    req->ptr = (void*)(intptr_t)k;
+    req->size = v;
+    write(thread_comm[0], &req, sizeof(req));
+}
+#endif
