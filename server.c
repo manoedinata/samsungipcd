@@ -1104,7 +1104,7 @@ void modem_registration_status_update(void)
     int state = modem_registration_get_status();
     API_DEBUG(" = %d\n", state);
     char* buf = NULL;
-    int len = asprintf(&buf, "\r\n+CGREG: 1,%d\r\n\r\nOK\r\n", state);
+    int len = asprintf(&buf, "\r\n+CGREG: 1,%d\r\n", state);
     broadcast_notification(buf);
     free(buf);
 }
