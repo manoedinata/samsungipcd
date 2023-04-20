@@ -30,6 +30,9 @@ struct io_buf
     size_t cap;
 };
 
+int n_total = 0;
+int n_ppp = 0;
+
 enum { BUF_MIN_SIZE = 1024 };
 
 static char* in_buf_pop_delim(struct io_buf* b, char delim, size_t* size)
@@ -57,8 +60,16 @@ static char* in_buf_pop_pdu(struct io_buf* b)
     return in_buf_pop_delim(b, '\x1a', NULL);
 }
 
-static char* in_buf_pop_ppp(struct io_buf* b, size_t* size)
+static char* in_buf_pop_ppp(struct io_buf* b, size_t* size, int* is_ppp)
 {
+    if(b->sz >= 2 && b->data[0] == 'A' && b->data[1] == 'T')
+    {
+        //a valid PPP packet never starts with "AT"
+        //if we receive this, the PPP connection must've been abruptly terminated
+        *is_ppp = 0;
+        n_ppp--;
+        return in_buf_pop_at(b);
+    }
     return in_buf_pop_delim(b, '\x7e', size);
 }
 
@@ -162,9 +173,6 @@ static int format_ccwa(char** msg)
             (number && number[0] == '+') ? 145 : 129
         ); //TODO: string escape
 }
-
-int n_total = 0;
-int n_ppp = 0;
 
 struct conn_status
 {
@@ -522,13 +530,12 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
 
 static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, struct conn_status* st)
 {
-    char* ppp;
     size_t ppp_size;
-    char* cmd;
+    char* cmd; //also used to store PPP packet
     char* pdu;
     while(
         st->is_ppp
-        ? (ppp = in_buf_pop_ppp(in_buf, &ppp_size))
+        ? (cmd = in_buf_pop_ppp(in_buf, &ppp_size, &st->is_ppp))
         : (st->want_pdu
         ? (pdu = in_buf_pop_pdu(in_buf))
         : (cmd = in_buf_pop_at(in_buf)))
@@ -536,7 +543,7 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
     {
         if(st->is_ppp)
         {
-            if(handle_ppp(out_buf, ppp, ppp_size))
+            if(handle_ppp(out_buf, cmd, ppp_size))
             {
                 st->is_ppp = 0;
                 n_ppp--;
@@ -798,12 +805,18 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
                 free(msg);
             }
         }
-        else if(!strcmp(cmd, "ATD*99***1#") && n_ppp < n_total)
+        else if(!strcmp(cmd, "ATD*99***1#"))
         {
-            WRITE_OK(out_buf);
-            st->is_ppp = 1;
-            //if we got here, we clearly weren't in PPP mode before
-            n_ppp++;
+            if(n_ppp < n_total)
+            {
+                WRITE_OK(out_buf);
+                st->is_ppp = 1;
+                //if we got here, we clearly weren't in PPP mode before
+                n_ppp++;
+            }
+            else
+                //no, we don't actually want to dial this number
+                WRITE_ERROR(out_buf);
         }
         else if(!strncmp(cmd, "ATD", 3))
         {
