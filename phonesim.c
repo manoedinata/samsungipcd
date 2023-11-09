@@ -144,6 +144,25 @@ int modem_call_answer(void)
     return 0;
 }
 
+int modem_call_send_dtmf(char key)
+{
+    if(call_state != MODEM_CALL_STATE_ACTIVE)
+    {
+        printf("\rCannot send DTMF codes without an active call\n> ");
+        fflush(stdout);
+        return -1;
+    }
+    if(!((key >= '0' && key <= '9') || (key >= 'A' && key <= 'D') || key == '*' || key == '#'))
+    {
+        printf("\rInvalid DTMF key %c\n> ", key);
+        fflush(stdout);
+        return -1;
+    }
+    printf("\rDTMF code received: %c\n> ", key);
+    fflush(stdout);
+    return 0;
+}
+
 int modem_poll_update_fds(struct modem_fd_set* a, struct modem_fd_set* b)
 {
     modem_poll_fd_set(0, a);
@@ -304,11 +323,13 @@ int modem_poll_poll(const struct modem_fd_set* a, const struct modem_fd_set* b)
         ssize_t l = getline(&line, &linesz, stdin);
         if(l < 0)
             return 0;
+        else if(l == 0)
+            exit(0);
         line[l] = 0;
         while(l && line[l-1] == '\n')
             line[--l] = 0;
         if(!strcmp(line, "help"))
-            printf("Commands: help, answer, hangup, incoming, sms\n");
+            printf("Commands: help, answer, hangup, incoming, sms, quit\n");
         else if(!strcmp(line, "answer"))
         {
             if(call_state == MODEM_CALL_STATE_DIALING)
@@ -382,6 +403,8 @@ int modem_poll_poll(const struct modem_fd_set* a, const struct modem_fd_set* b)
         }
         else if(!strcmp(line, "sms"))
             printf("Usage: sms <pdu>\n");
+        else if(!strcmp(line, "quit"))
+            exit(0);
         else
             printf("Unknown command: %s\n", line);
         printf("> ");

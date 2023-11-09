@@ -197,6 +197,7 @@ enum
     THREAD_REQ_TYPE_DIAL,
     THREAD_REQ_TYPE_SET_ONLINE,
     THREAD_REQ_TYPE_REGIST,
+    THREAD_REQ_TYPE_DTMF_TONE,
 #ifdef DEBUG_COMMAND
     THREAD_REQ_TYPE_DEBUG,
 #endif
@@ -220,7 +221,7 @@ static int ifdownup(void)
 
 static const int channel_volumes[4][2] = {
     {IPC_SND_VOLUME_TYPE_VOICE, 0},
-    {IPC_SND_VOLUME_TYPE_SPEAKER, 100},
+    {IPC_SND_VOLUME_TYPE_SPEAKER, 127},
     {IPC_SND_VOLUME_TYPE_HEADSET, 0},
     {IPC_SND_VOLUME_TYPE_BTVOICE, 0},
 };
@@ -380,6 +381,8 @@ static void* sipc_thread(void* arg)
                 else
                     ipc_client_send(fmt, seq_cntr++, IPC_PWR_PHONE_PWR_OFF, IPC_TYPE_EXEC, NULL, 0);
             }
+            else if(ptr->type == THREAD_REQ_TYPE_DTMF_TONE)
+                ipc_client_send(fmt, seq_cntr++, IPC_CALL_CONT_DTMF, IPC_TYPE_SET, ptr->ptr, ptr->size);
 #ifdef DEBUG_COMMAND
             else if(ptr->type == THREAD_REQ_TYPE_DEBUG)
             {
@@ -399,7 +402,19 @@ static void* sipc_thread(void* arg)
                 net_status = ((struct ipc_net_regist_response_data*)msg.data)->status;
                 if(net_status == IPC_NET_REGISTRATION_STATUS_NONE
                 || net_status == IPC_NET_REGISTRATION_STATUS_SEARCHING)
+                {
+                    int old_have = have_gprs;
+                    have_gprs = 0;
+                    if(old_have)
+                    {
+                        struct thread_req* req = malloc(sizeof(*req));
+                        req->type = THREAD_REQ_TYPE_SET_GPRS;
+                        req->ptr = NULL;
+                        req->size = 0;
+                        write(thread_comm[1], &req, sizeof(req));
+                    }
                     rssi = 0;
+                }
                 printf("net_status = %d\n", net_status);
             }
             struct thread_req* req = malloc(sizeof(*req));
@@ -524,6 +539,19 @@ static void* sipc_thread(void* arg)
                     have_gprs = 1;
                 }
                 ifdownup();
+            }
+        }
+        else if(msg.command == IPC_GPRS_CALL_STATUS)
+        {
+            struct ipc_gprs_call_status_data* st = msg.data;
+            printf("%d\n", st->status);
+            if(st->status != IPC_GPRS_STATUS_ENABLED)
+            {
+                struct thread_req* req = malloc(sizeof(*req));
+                req->type = THREAD_REQ_TYPE_SET_GPRS;
+                req->ptr = NULL;
+                req->size = 0;
+                write(thread_comm[1], &req, sizeof(req));
             }
         }
         else if(msg.command == IPC_CALL_STATUS)
@@ -903,6 +931,35 @@ int modem_call_answer(void)
 int modem_call_hangup(void)
 {   
     do_send_answer(0);
+    return 0;
+}
+
+//TODO: refactor this into a proper event loop
+static void* dtmf_thread(void* arg)
+{
+    for(int state = 1; state >= 0; state--)
+    {
+        struct thread_req* req = malloc(sizeof(*req));
+        struct ipc_call_cont_dtmf_data* p = malloc(sizeof(*p));
+        p->status = state ? IPC_CALL_DTMF_STATUS_START : IPC_CALL_DTMF_STATUS_STOP;
+        p->tone = (char)(uintptr_t)arg;
+        req->type = THREAD_REQ_TYPE_DTMF_TONE;
+        req->ptr = p;
+        req->size = sizeof(*p);
+        write(thread_comm[0], &req, sizeof(req));
+        if(state)
+            usleep(200000);
+    }
+    return NULL;
+}
+
+int modem_call_send_dtmf(char key)
+{
+    pthread_t pth;
+    if(pthread_create(&pth, NULL, dtmf_thread, (void*)(uintptr_t)key))
+        return -1;
+    if(pthread_detach(pth))
+        return -1;
     return 0;
 }
 

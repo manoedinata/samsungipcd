@@ -874,6 +874,21 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
                 WRITE_ERROR(out_buf);
             }
         }
+        else if(!strncmp(cmd, "AT+VTS=", 7) && cmd[7])
+        {
+            char key = cmd[7];
+            API_DEBUG("modem_call_send_dtmf('%c')", key);
+            if(!modem_call_send_dtmf(key))
+            {
+                API_DEBUG("= 0 (OK)\n");
+                WRITE_OK(out_buf);
+            }
+            else
+            {
+                API_DEBUG(" = ERROR\n");
+                WRITE_ERROR(out_buf);
+            }
+        }
         else if(!strncmp(cmd, "AT+CMGS=", 8))
         {
             out_buf_write(out_buf, "\r\n>", 3);

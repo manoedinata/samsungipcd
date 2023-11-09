@@ -85,6 +85,7 @@ int modem_call_dial(const char* number);
 int modem_call_get_info(const char** number, int* state, int* direction); //bool whether the call exists
 int modem_call_answer(void);
 int modem_call_hangup(void);
+int modem_call_send_dtmf(char which); //ascii code of the digit
 
 /* call-related callbacks */
 void modem_call_incoming(void);
