@@ -125,6 +125,7 @@ static int out_buf_flush(struct io_buf* b, int fd)
 
 #ifdef API_DEBUG
 
+#define DO_IP_DEBUG
 #undef API_DEBUG
 #define API_DEBUG(...) fprintf(stderr, __VA_ARGS__)
 
@@ -407,10 +408,8 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             free(ppp);
             return 0;
         }
-#ifdef API_DEBUG
         API_DEBUG(" = 0 (OK)\n");
-#endif
-#if defined(PPP_DUMP) || defined(API_DEBUG)
+#if defined(PPP_DUMP) || defined(DO_API_DEBUG)
         fprintf(stderr, "IPCP configuration:\n");
         fprintf(stderr, "Local IP: %hhu.%hhu.%hhu.%hhu\n", local_ip[0], local_ip[1], local_ip[2], local_ip[3]);
         fprintf(stderr, "DNS1: %hhu.%hhu.%hhu.%hhu\n", dns1[0], local_ip[1], local_ip[2], local_ip[3]);
@@ -496,6 +495,84 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
                 out_buf_write(out_buf, ppp2, ppp2_size);
                 free(ppp2);
                 ppp[4] = ip_nak ? 3 : 2; //configure-nak or configure-ack
+            }
+            ppp_crc_fix(ppp, ppp_size);
+            ppp = escape_ppp(ppp, &ppp_size, &ppp_cap);
+            out_buf_write(out_buf, ppp, ppp_size);
+        }
+    }
+    else if(protocol == 0x8057 /* IPV6CP */)
+    {
+        if(pkt_size < 4)
+        {
+            free(ppp);
+            return 0;
+        }
+        char identifier[8];
+        API_DEBUG("modem_inet_get_ipv6_link_identifier(...)");
+        if(modem_inet_get_ipv6_link_identifier(identifier))
+        {
+            API_DEBUG(" = ERROR\n");
+            free(ppp);
+            return 0;
+        }
+        API_DEBUG(" = 0 (OK)\n");
+#if defined(PPP_DUMP) || defined(DO_API_DEBUG)
+        fprintf(stderr, "IPV6CP link identifier: (fe80::)%02hhx%02hhx:%02hhx%02hhx:%02hhx%02hhx:%02hhx%02hhx\n", identifier[0], identifier[1], identifier[2], identifier[3], identifier[4], identifier[5], identifier[6], identifier[7]);
+#endif
+        if(pkt[0] == 1) //configure-request
+        {
+            int have_rej = 0;
+            int nak = 0;
+            int have_id = 0;
+            size_t l = (uint16_t)(uint8_t)pkt[2] << 8 | (uint8_t)pkt[3];
+            if(l >= pkt_size)
+                l = pkt_size;
+            char* q = pkt + 4;
+            for(size_t i = 4; i < pkt_size; i += (uint8_t)pkt[i+1])
+            {
+                if(pkt[i] == 1 && pkt[i+1] == 10 && i + 10 <= l && !have_id)
+                {
+                    if(memcmp(pkt+i+2, identifier, 8))
+                    {
+                        memcpy(pkt+i+2, identifier, 8);
+                        nak = 1;
+                    }
+                    have_id = 1;
+                }
+                else
+                {
+                    have_rej = 1;
+                    size_t sz = (uint8_t)pkt[i+1];
+                    if(sz >= l - i)
+                        sz = l - i;
+                    memmove(q, pkt+i, sz);
+                    q += sz;
+                }
+            }
+            if(have_rej)
+            {
+                pkt[0] = 4; //configure-reject
+                pkt[2] = (q - pkt) >> 8;
+                pkt[3] = q - pkt;
+                ppp_size = (q - ppp) + 2;
+            }
+            else
+            {
+                char* ppp2 = malloc(ppp_cap);
+                size_t ppp2_size = ppp_size;
+                size_t ppp2_cap = ppp_cap;
+                memcpy(ppp2, ppp, ppp2_size);
+                //in our configure-req we pretend to be another node, so we must use a different id
+                char* pkt2 = ppp2 + 4;
+                for(size_t i = 4; i + 1 < l; i += (uint8_t)pkt[i+i])
+                    if(pkt2[i] == 1 && pkt2[i+1] == 10)
+                        pkt2[i+9] ^= 1;
+                ppp_crc_fix(ppp2, ppp2_size);
+                ppp2 = escape_ppp(ppp2, &ppp2_size, &ppp2_cap);
+                out_buf_write(out_buf, ppp2, ppp2_size);
+                free(ppp2);
+                pkt[0] = nak ? 3 : 2; //configure-nak or configure-ack
             }
             ppp_crc_fix(ppp, ppp_size);
             ppp = escape_ppp(ppp, &ppp_size, &ppp_cap);

@@ -162,8 +162,10 @@ static char* gprs_password;
 static char gprs_ip[4];
 static char gprs_dns1[4];
 static char gprs_dns2[4];
+static char ipv6_link_id[8];
 static int need_gprs;
 static int have_gprs;
+static int have_ipv6_link;
 static int rmnet_fd;
 static int packet_fd;
 
@@ -395,11 +397,13 @@ static void* sipc_thread(void* arg)
         memset(&msg, 0, sizeof(msg));
         if(ipc_client_recv(fmt, &msg))
             continue;
+#define GET(x) ((char*)(1+&(x)) <= (char*)msg.data + msg.size ? (x) : 0)
+#define PTRCHECK(x, sz, fallback) ((char*)(x) + (size_t)(sz) <= (char*)msg.data + msg.size ? (x) : (void*)(fallback))
         if(msg.command == IPC_NET_REGIST)
         {
             LOCKED()
             {
-                net_status = ((struct ipc_net_regist_response_data*)msg.data)->status;
+                net_status = GET(((struct ipc_net_regist_response_data*)msg.data)->status);
                 if(net_status == IPC_NET_REGISTRATION_STATUS_NONE
                 || net_status == IPC_NET_REGISTRATION_STATUS_SEARCHING)
                 {
@@ -426,7 +430,8 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_NET_SERVING_NETWORK)
         {
             char plmn[6] = {0};
-            memcpy(plmn, ((struct ipc_net_serving_network_data*)msg.data)->plmn, 5);
+            char dummy_plmn[5] = {0};
+            memcpy(plmn, PTRCHECK(((struct ipc_net_serving_network_data*)msg.data)->plmn, 5, dummy_plmn), 5);
             LOCKED()
             {
                 plmn_code = atoi(plmn);
@@ -442,7 +447,7 @@ static void* sipc_thread(void* arg)
         {
             LOCKED()
             {
-                rssi = -((struct ipc_disp_rssi_info_data*)msg.data)->rssi;
+                rssi = -GET(((struct ipc_disp_rssi_info_data*)msg.data)->rssi);
                 printf("rssi = %d\n", rssi);
             }
         }
@@ -451,7 +456,7 @@ static void* sipc_thread(void* arg)
             struct ipc_gen_phone_res_data* pld = msg.data;
             if(ipc_gen_phone_res_check(msg.data))
                 printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
-            else if(IPC_COMMAND(pld->group, pld->index) == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
+            else if(IPC_COMMAND(GET(pld->group), GET(pld->index)) == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
             {
                 struct ipc_gprs_pdp_context_request_set_data data;
                 char username[sizeof(data.username)];
@@ -470,14 +475,17 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_SMS_SVC_CENTER_ADDR)
         {
             uint8_t* smsc = (uint8_t*)msg.data;
-            smsc_addr_len = smsc[0];
-            smsc_addr = realloc(smsc_addr, smsc_addr_len);
-            memcpy(smsc_addr, smsc+1, smsc_addr_len);
+            smsc_addr_len = GET(smsc[0]);
+            if(smsc_addr_len < msg.size)
+            {
+                smsc_addr = realloc(smsc_addr, smsc_addr_len);
+                memcpy(smsc_addr, smsc+1, smsc_addr_len);
+            }
         }
         else if(msg.command == IPC_SMS_SEND_MSG) //ack
         {
             struct ipc_sms_send_msg_response_data* resp = msg.data;
-            printf("IPC_SMS_SEND_MSG response, id=%hhx, ack=%hx\n", resp->id, resp->ack);
+            printf("IPC_SMS_SEND_MSG response, id=%hhx, ack=%hx\n", GET(resp->id), GET(resp->ack));
         }
         else if(msg.command == IPC_SMS_INCOMING_MSG)
         {
@@ -485,29 +493,32 @@ static void* sipc_thread(void* arg)
             struct ipc_sms_incoming_msg_header* hdr = msg.data;
             delr.type = IPC_SMS_TYPE_STATUS_REPORT;
             delr.ack = IPC_SMS_ACK_NO_ERROR;
-            delr.id = hdr->id;
-            ipc_client_send(fmt, seq_cntr++, IPC_SMS_DELIVER_REPORT, IPC_TYPE_EXEC, &delr, sizeof(delr));
-            size_t length = hdr->length;
-            char* buf = malloc(length);
-            memcpy(buf, hdr+1, length);
-            size_t idx;
-            LOCKED0(sms_storage_lock)
-                idx = deque_push(&sms_storage, buf, length);
-            struct thread_req* req = malloc(sizeof(*req));
-            req->type = THREAD_REQ_TYPE_SMS_INCOMING;
-            req->ptr = NULL;
-            req->size = idx;
-            write(thread_comm[1], &req, sizeof(req));
+            delr.id = GET(hdr->id);
+            size_t length = GET(hdr->length);
+            if(length < msg.size)
+            {
+                ipc_client_send(fmt, seq_cntr++, IPC_SMS_DELIVER_REPORT, IPC_TYPE_EXEC, &delr, sizeof(delr));
+                char* buf = malloc(length);
+                memcpy(buf, hdr+1, length);
+                size_t idx;
+                LOCKED0(sms_storage_lock)
+                    idx = deque_push(&sms_storage, buf, length);
+                struct thread_req* req = malloc(sizeof(*req));
+                req->type = THREAD_REQ_TYPE_SMS_INCOMING;
+                req->ptr = NULL;
+                req->size = idx;
+                write(thread_comm[1], &req, sizeof(req));
+            }
         }
         else if(msg.command == IPC_GPRS_IP_CONFIGURATION)
         {
             struct ipc_gprs_ip_configuration_data* data = msg.data;
-            /*uint8_t* ptr = data;
+            uint8_t* ptr = (void*)data;
             printf("packet:");
             for(int i = 0; i < msg.size; i++)
                 printf(" %02hhx", ptr[i]);
-            printf("\n");*/
-            if((data->field_flag & 7) != 7)
+            printf("\n");
+            if((GET(data->field_flag) & 7) != 7)
             {
                 printf("gprs_ip_configuration without data, no idea what to do\n");
                 //disconnect the modem
@@ -530,9 +541,21 @@ static void* sipc_thread(void* arg)
             {
                 LOCKED()
                 {
-                    memcpy(gprs_ip, data->ip, 4);
-                    memcpy(gprs_dns1, data->dns1, 4);
-                    memcpy(gprs_dns2, data->dns2, 4);
+                    char stub_ip[8] = {0};
+                    memcpy(gprs_ip, PTRCHECK(data->ip, 4, stub_ip), 4);
+                    memcpy(gprs_dns1, PTRCHECK(data->dns1, 4, stub_ip), 4);
+                    memcpy(gprs_dns2, PTRCHECK(data->dns2, 4, stub_ip), 4);
+#if 0
+                    //this doesn't actually work yet
+                    char* ipv6_link_local = (char*)data + 35;
+                    if(!memcmp(PTRCHECK(ipv6_link_local, 8, stub_ip), "\xfe\x80\x00\x00\x00\x00\x00", 8))
+                    {
+                        have_ipv6_link = 1;
+                        memcpy(ipv6_link_id, PTRCHECK(ipv6_link_local+8, 8, stub_ip), 8);
+                    }
+                    else
+                        have_ipv6_link = 0;
+#endif
                     /*printf("ip = 0x%x\n", *(int*)data->ip);
                     printf("dns1 = 0x%x\n", *(int*)data->dns1);
                     printf("dns2 = 0x%x\n", *(int*)data->dns2);*/
@@ -544,7 +567,7 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_GPRS_CALL_STATUS)
         {
             struct ipc_gprs_call_status_data* st = msg.data;
-            printf("%d\n", st->status);
+            printf("%d\n", GET(st->status));
             if(st->status != IPC_GPRS_STATUS_ENABLED)
             {
                 struct thread_req* req = malloc(sizeof(*req));
@@ -557,10 +580,10 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_CALL_STATUS)
         {
             struct ipc_call_status_data* st = msg.data;
-            printf("%d\n", st->status);
+            printf("%d\n", GET(st->status));
             LOCKED()
             {
-                switch(st->status)
+                switch(GET(st->status))
                 {
                 case IPC_CALL_STATUS_DIALING:
                     call_state = MODEM_CALL_STATE_DIALING;
@@ -588,44 +611,47 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_CALL_INCOMING)
         {
             struct ipc_call_incoming_data* data = msg.data;
-            if(data->type == IPC_CALL_TYPE_VOICE)
+            if(GET(data->type) == IPC_CALL_TYPE_VOICE)
             {
-                call_id = data->id;
+                call_id = GET(data->id);
                 //ask modem for call list
                 ipc_client_send(fmt, seq_cntr++, IPC_CALL_LIST, IPC_TYPE_GET, NULL, 0);
             }
         }
         else if(msg.command == IPC_CALL_LIST)
         {
+#if 0
             {
                 uint8_t* data = msg.data;
                 for(int i = 0; i < msg.size; i++)
                     printf("%02hhx ", data[i]);
                 printf("\n");
             }
+#endif
             struct ipc_call_list_header* h = msg.data;
             struct ipc_call_list_entry* end = (void*)((char*)msg.data + msg.size);
-            uint8_t count = h->count;
+            uint8_t count = GET(h->count);
             struct ipc_call_list_entry* cur = (void*)(h+1);
             int found = 0;
             for(size_t i = 0; i < count && !found; i++)
             {
                 char* number = (char*)(cur + 1);
-                if(cur->type == IPC_CALL_TYPE_VOICE
-                && cur->id == call_id)
+                size_t len = GET(cur->number_length);
+                if(GET(cur->type) == IPC_CALL_TYPE_VOICE
+                && GET(cur->id) == call_id)
                 {
                     found = 1;
-                    char* num_alloc = malloc(cur->number_length+1);
-                    for(size_t i = 0; i < cur->number_length; i++)
-                        num_alloc[i] = number[i];
-                    num_alloc[cur->number_length] = 0;
+                    char* num_alloc = malloc(len+1);
+                    for(size_t i = 0; i < len; i++)
+                        num_alloc[i] = GET(number[i]);
+                    num_alloc[GET(cur->number_length)] = 0;
                     struct thread_req* req = malloc(sizeof(*req));
                     req->type = THREAD_REQ_TYPE_DIAL;
                     req->ptr = num_alloc;
-                    req->size = cur->number_length;
+                    req->size = len;
                     write(thread_comm[1], &req, sizeof(req));
                 }
-                cur = (void*)(number + cur->number_length);
+                cur = (void*)(number + len);
             }
             if(!found)
             {
@@ -636,6 +662,9 @@ static void* sipc_thread(void* arg)
                 write(thread_comm[1], &req, sizeof(req));
             }
         }
+        // msg.command = 0x0b0d -> returns some JSON
+#undef PTRCHECK
+#undef GET
         free(msg.data);
     }
     return 0;
@@ -1026,6 +1055,19 @@ int modem_inet_get_ipv4_addresses(char ip[4], char dns1[4], char dns2[4])
         memcpy(ip, gprs_ip, 4);
         memcpy(dns1, gprs_dns1, 4);
         memcpy(dns2, gprs_dns2, 4);
+    }
+    if(!hg)
+        return -1;
+    return 0;
+}
+
+int modem_inet_get_ipv6_link_identifier(char link_id[8])
+{
+    int hg;
+    LOCKED()
+    {
+        hg = have_gprs && have_ipv6_link;
+        memcpy(link_id, ipv6_link_id, 8);
     }
     if(!hg)
         return -1;

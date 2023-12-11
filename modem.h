@@ -104,6 +104,7 @@ int modem_inet_set_username_password(const char* username, const char* password)
 const char* modem_inet_get_apn(void);
 int modem_inet_set_enabled(int is_enabled);
 int modem_inet_get_ipv4_addresses(char ip[4], char dns1[4], char dns2[4]);
+int modem_inet_get_ipv6_link_identifier(char linkid[8]); //last 8 bytes of the link-local address
 int modem_inet_send_packet(int protocol, const char* pkt, size_t sz);
 
 /* mobile internet callbacks */

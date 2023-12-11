@@ -295,6 +295,12 @@ int modem_inet_get_ipv4_addresses(char buf[4], char buf2[4], char buf3[4])
     return 0;
 }
 
+int modem_inet_get_ipv6_link_identifier(char linkid[8])
+{
+    memset(linkid, 'A', 8);
+    return 0;
+}
+
 int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
 {
     char* pkt2 = malloc(sz);
