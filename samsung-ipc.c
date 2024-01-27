@@ -147,7 +147,12 @@ static void log_callback(void* data, const char* msg)
     puts(msg);
 }
 
+static char* imei;
+
 static int net_status = IPC_NET_REGISTRATION_STATUS_NONE;
+static int net_tech = IPC_NET_ACCESS_TECHNOLOGY_UNKNOWN;
+static int net_lac = -1;
+static int net_cid = -1;
 static int plmn_code = -1;
 static int rssi = 0;
 
@@ -200,6 +205,7 @@ enum
     THREAD_REQ_TYPE_SET_ONLINE,
     THREAD_REQ_TYPE_REGIST,
     THREAD_REQ_TYPE_DTMF_TONE,
+    THREAD_REQ_TYPE_IMEI,
 #ifdef DEBUG_COMMAND
     THREAD_REQ_TYPE_DEBUG,
 #endif
@@ -388,7 +394,19 @@ static void* sipc_thread(void* arg)
 #ifdef DEBUG_COMMAND
             else if(ptr->type == THREAD_REQ_TYPE_DEBUG)
             {
-                //...
+                int k = (intptr_t)ptr->ptr;
+                int v = ptr->size;
+                switch(k)
+                {
+                    //...
+                case 0:
+                {
+                    struct ipc_net_mode_sel_data data = {
+                        .mode_sel = v,
+                    };
+                    ipc_client_send(fmt, seq_cntr++, IPC_NET_MODE_SEL, IPC_TYPE_SET, &data, sizeof(data));
+                }
+                }
             }
 #endif
             free(ptr);
@@ -403,7 +421,11 @@ static void* sipc_thread(void* arg)
         {
             LOCKED()
             {
-                net_status = GET(((struct ipc_net_regist_response_data*)msg.data)->status);
+                struct ipc_net_regist_response_data* data = msg.data;
+                net_status = GET(data->status);
+                net_tech = GET(data->act);
+                net_lac = GET(data->lac);
+                net_cid = GET(data->cid);
                 if(net_status == IPC_NET_REGISTRATION_STATUS_NONE
                 || net_status == IPC_NET_REGISTRATION_STATUS_SEARCHING)
                 {
@@ -418,8 +440,10 @@ static void* sipc_thread(void* arg)
                         write(thread_comm[1], &req, sizeof(req));
                     }
                     rssi = 0;
+                    net_lac = -1;
+                    net_cid = -1;
                 }
-                printf("net_status = %d\n", net_status);
+                printf("net_status = %d, act = %d\n", net_status, net_tech);
             }
             struct thread_req* req = malloc(sizeof(*req));
             req->type = THREAD_REQ_TYPE_REGIST;
@@ -435,6 +459,7 @@ static void* sipc_thread(void* arg)
             LOCKED()
             {
                 plmn_code = atoi(plmn);
+                net_lac = GET(((struct ipc_net_serving_network_data*)msg.data)->lac);
                 printf("PLMN = %d\n", plmn_code);
             }
             struct thread_req* req = malloc(sizeof(*req));
@@ -662,6 +687,29 @@ static void* sipc_thread(void* arg)
                 write(thread_comm[1], &req, sizeof(req));
             }
         }
+        else if(msg.command == IPC_PWR_PHONE_PWR_UP || msg.command == IPC_PWR_PHONE_PWR_OFF)
+        {
+            //modem is ready, request the IMEI now
+            struct ipc_misc_me_sn_request_data data = {
+                .type = IPC_MISC_ME_SN_SERIAL_NUM,
+            };
+            ipc_client_send(fmt, seq_cntr++, IPC_MISC_ME_SN, IPC_TYPE_GET, &data, sizeof(data));
+        }
+        else if(msg.command == IPC_MISC_ME_SN)
+        {
+            struct ipc_misc_me_sn_response_data* data = msg.data;
+            if(msg.size >= sizeof(*data) && data->length <= 32)
+            {
+                char* imei = malloc(data->length + 1);
+                memcpy(imei, data->data, data->length);
+                imei[data->length] = 0;
+                struct thread_req* req = malloc(sizeof(*req));
+                req->type = THREAD_REQ_TYPE_IMEI;
+                req->ptr = imei;
+                req->size = data->length + 1;
+                write(thread_comm[1], &req, sizeof(req));
+            }
+        }
         // msg.command = 0x0b0d -> returns some JSON
 #undef PTRCHECK
 #undef GET
@@ -794,19 +842,21 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
             }
             else
             {
+                modem_call_remote_hangup();
                 LOCKED()
                 {
                     call_state = -1;
                     call_direction = -1;
                     update_one(&call_number, NULL);
                 }
-                modem_call_remote_hangup();
             }
         }
         else if(cmd->type == THREAD_REQ_TYPE_SET_GPRS && !cmd->size)
             modem_inet_disconnected();
         else if(cmd->type == THREAD_REQ_TYPE_REGIST)
             modem_registration_status_update();
+        else if(cmd->type == THREAD_REQ_TYPE_IMEI)
+            update_one_owned(&imei, cmd->ptr);
         free(cmd);
     }
     return 0;
@@ -832,9 +882,11 @@ const char* modem_conf_get_name(int short_name) //XXX
     return short_name ? "libsamsung-ipc" : "samsung";
 }
 
-const char* modem_conf_get_serial(void) //XXX
+const char* modem_conf_get_serial(void)
 {
-    return "dummy";
+    if(!imei)
+        do_poll(NULL, NULL, 0, NULL);
+    return imei;
 }
 
 static int online_status = 0;
@@ -886,7 +938,35 @@ const char* modem_registration_get_operator_name(int short_form) //FIXME
 
 int modem_registration_get_status(void)
 {
-    return net_status - 1;
+    int ans;
+    LOCKED() ans = net_status - 1;
+    return ans;
+}
+
+void modem_registration_get_cell_info(int* act, int* lac, int* cid)
+{
+    *lac = net_lac;
+    *cid = net_cid;
+    switch(net_tech) //wild guesses, i'm not sure i understand what's what
+    {
+    case IPC_NET_ACCESS_TECHNOLOGY_GSM:
+    case IPC_NET_ACCESS_TECHNOLOGY_GSM2:
+    case IPC_NET_ACCESS_TECHNOLOGY_GPRS:
+        *act = MODEM_ACCESS_TECHNOLOGY_GSM;
+        break;
+    case IPC_NET_ACCESS_TECHNOLOGY_EDGE:
+        *act = MODEM_ACCESS_TECHNOLOGY_GSM_EGPRS;
+        break;
+    case IPC_NET_ACCESS_TECHNOLOGY_UMTS:
+        *act = MODEM_ACCESS_TECHNOLOGY_UTRAN;
+        break;
+    case 33: //not present in libsamsung-ipc headers, probably means LTE
+        *act = MODEM_ACCESS_TECHNOLOGY_EUTRAN;
+        break;
+    default:
+        *act = -1;
+        break;
+    }
 }
 
 int modem_registration_get_rssi(void)

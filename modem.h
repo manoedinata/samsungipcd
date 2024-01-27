@@ -42,6 +42,27 @@ enum
     MODEM_REGISTRATION_MODE_MANUAL_AUTOMATIC = 4,
 };
 
+//i don't understand any of these abbreviations, does sipc even provide this info?
+//in the comment = what modemmanager would classify this as
+enum
+{
+    MODEM_ACCESS_TECHNOLOGY_GSM = 0, //GSM
+    MODEM_ACCESS_TECHNOLOGY_GSM_COMPACT = 1, //GSM compact
+    MODEM_ACCESS_TECHNOLOGY_UTRAN = 2, //UMTS
+    MODEM_ACCESS_TECHNOLOGY_GSM_EGPRS = 3, //EDGE
+    MODEM_ACCESS_TECHNOLOGY_UTRAN_HSDPA = 4, //HSDPA
+    MODEM_ACCESS_TECHNOLOGY_UTRAN_HSUPA = 5, //HSUPA
+    MODEM_ACCESS_TECHNOLOGY_UTRAN_HSDPA_HSUPA = 6, //HSPA
+    MODEM_ACCESS_TECHNOLOGY_EUTRAN = 7, //LTE
+    MODEM_ACCESS_TECHNOLOGY_ECGSM = 8, //GSM
+    MODEM_ACCESS_TECHNOLOGY_EUTRAN_NB_S1 = 9, //LTE
+    MODEM_ACCESS_TECHNOLOGY_EUTRA_5GCN = 10, //LTE
+    MODEM_ACCESS_TECHNOLOGY_NR_5GCN = 11, //5GNR
+    MODEM_ACCESS_TECHNOLOGY_NR_EPS = 12, //5GNR
+    MODEM_ACCESS_TECHNOLOGY_NGRAN = 13, //5GNR & LTE
+    MODEM_ACCESS_TECHNOLOGY_EUTRANR = 14, //not checked
+};
+
 enum
 {
     MODEM_PPP_PROTOCOL_IPV4 = 0x21,
@@ -63,8 +84,8 @@ void modem_poll_fd_clr(int fd, struct modem_fd_set* set);
 int modem_poll_fd_isset(int fd, const struct modem_fd_set* set);
 
 /* generic configuration */
-const char* modem_conf_get_name(int short_name);
-const char* modem_conf_get_serial(void);
+const char* modem_conf_get_name(int short_name); //retried on next update if returns NULL
+const char* modem_conf_get_serial(void); //better known as IMEI; retried on next update if returns NULL
 int modem_conf_is_online(void);
 int modem_conf_set_online(int is_online);
 
@@ -74,6 +95,7 @@ int modem_registration_get_operator_code(void);
 const char* modem_registration_get_operator_name(int short_form);
 int modem_registration_get_status(void);
 int modem_registration_get_rssi(void); //0 for unknown
+void modem_registration_get_cell_info(int* act, int* lac, int* cid); //-1 for unknown
 double modem_registration_get_error_rate(void); //-1 for unknown
 
 /* registration-related callbacks */
