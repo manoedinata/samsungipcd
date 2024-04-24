@@ -197,11 +197,12 @@ int modem_registration_get_status(void)
     return is_online ? MODEM_REGISTRATION_HOME_NETWORK : MODEM_REGISTRATION_NOT_REGISTERED;
 }
 
-void modem_registration_get_cell_info(int* act, int* lac, int* cid)
+void modem_registration_get_cell_info(int* act, int* lac, int* cid, int* tac)
 {
     *act = is_online ? MODEM_ACCESS_TECHNOLOGY_GSM : -1;
     *lac = is_online ? 0x1234 : -1;
     *cid = is_online ? 0x4321 : -1;
+    *tac = is_online ? 0 : -1; //GSM has no TAC
 }
 
 int modem_registration_get_rssi(void)

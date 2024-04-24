@@ -628,10 +628,11 @@ static int format_creg_response(const char* resp_name, char** buf)
     API_DEBUG("modem_registration_get_status()");
     int state = modem_registration_get_status();
     API_DEBUG(" = %d\n", state);
-    int act, lac, cid;
+    int act, lac, cid, tac;
     API_DEBUG("modem_registration_get_cell_info(");
-    modem_registration_get_cell_info(&act, &lac, &cid);
-    API_DEBUG("&%d, &%d, &%d)\n", act, lac, cid);
+    modem_registration_get_cell_info(&act, &lac, &cid, &tac);
+    API_DEBUG("&%d, &%d, &%d, &%d)\n", act, lac, cid, tac);
+    //XXX: for LTE networks we should really return CEREG, not CGREG...
     if(lac < 0 || cid < 0)
         return asprintf(buf, "\r\n+%s: 1,%d\r\n\r\nOK\r\n", resp_name, state);
     else if(act < 0)

@@ -153,6 +153,7 @@ static int net_status = IPC_NET_REGISTRATION_STATUS_NONE;
 static int net_tech = IPC_NET_ACCESS_TECHNOLOGY_UNKNOWN;
 static int net_lac = -1;
 static int net_cid = -1;
+static int net_tac = -1;
 static int plmn_code = -1;
 static int rssi = 0;
 
@@ -426,6 +427,8 @@ static void* sipc_thread(void* arg)
                 net_tech = GET(data->act);
                 net_lac = GET(data->lac);
                 net_cid = GET(data->cid);
+                if(msg.size >= 13)
+                    net_tac = *(uint16_t*)(msg.data+11);
                 if(net_status == IPC_NET_REGISTRATION_STATUS_NONE
                 || net_status == IPC_NET_REGISTRATION_STATUS_SEARCHING)
                 {
@@ -442,8 +445,9 @@ static void* sipc_thread(void* arg)
                     rssi = 0;
                     net_lac = -1;
                     net_cid = -1;
+                    net_tac = -1;
                 }
-                printf("net_status = %d, act = %d\n", net_status, net_tech);
+                printf("net_status = %d, act = %d, lac = %d, cid = %d, tac = %d\n", net_status, net_tech, net_lac, net_cid, net_tac);
             }
             struct thread_req* req = malloc(sizeof(*req));
             req->type = THREAD_REQ_TYPE_REGIST;
@@ -460,7 +464,13 @@ static void* sipc_thread(void* arg)
             {
                 plmn_code = atoi(plmn);
                 net_lac = GET(((struct ipc_net_serving_network_data*)msg.data)->lac);
-                printf("PLMN = %d\n", plmn_code);
+                if(msg.size >= 18)
+                {
+                    //undocumented in libsamsung-ipc
+                    net_cid = *(uint32_t*)(msg.data+12);
+                    net_tac = *(uint16_t*)(msg.data+16);
+                }
+                printf("PLMN = %d, lac = %d, cid = %d, tac = %d\n", plmn_code, net_lac, net_cid, net_tac);
             }
             struct thread_req* req = malloc(sizeof(*req));
             req->type = THREAD_REQ_TYPE_REGIST;
@@ -775,7 +785,7 @@ int modem_init(void)
     rmnet_fd = open_rmnet();
     if(rmnet_fd < 0)
         return -1;
-#if 0
+#ifdef REVERSE_PACKET_FORWARDING
     packet_fd = open_packet();
     if(packet_fd < 0)
         return -1;
@@ -797,13 +807,15 @@ int modem_init(void)
 int modem_poll_update_fds(struct modem_fd_set* rs, struct modem_fd_set* ws)
 {
     modem_poll_fd_set(thread_comm[0], rs);
-    //modem_poll_fd_set(packet_fd, rs);
+#ifdef REVERSE_PACKET_FORWARDING
+    modem_poll_fd_set(packet_fd, rs);
+#endif
     return 0;
 }
 
 static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws, int target, struct thread_req** req)
 {
-#if 0
+#ifdef REVERSE_PACKET_FORWARDING
     if(rs && modem_poll_fd_isset(packet_fd, rs))
     {
         char buf[1500];
