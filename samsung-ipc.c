@@ -955,10 +955,11 @@ int modem_registration_get_status(void)
     return ans;
 }
 
-void modem_registration_get_cell_info(int* act, int* lac, int* cid)
+void modem_registration_get_cell_info(int* act, int* lac, int* cid, int* tac)
 {
     *lac = net_lac;
     *cid = net_cid;
+    *tac = net_tac;
     switch(net_tech) //wild guesses, i'm not sure i understand what's what
     {
     case IPC_NET_ACCESS_TECHNOLOGY_GSM:
