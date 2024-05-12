@@ -1,5 +1,5 @@
 /*
-Copyright 2022 Sergey Lisov
+Copyright 2022-2024 Sergey Lisov
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
 
@@ -649,10 +649,10 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         WRITE_OK_STRING(out_buf, "\r\ngeneric\r\n");
     else if(!strcmp(cmd, "ATE0"))
         WRITE_OK(out_buf);
-    else if(!strcmp(cmd, "AT+CSCS=\"GSM\""))
+    else if(!strcmp(cmd, "AT+CSCS=\"UTF-8\""))
         WRITE_OK(out_buf);
     else if(!strcmp(cmd, "AT+CSCS?") || !strcmp(cmd, "AT+CSCS=?"))
-        WRITE_OK_STRING(out_buf, "\r\n+CSCS: \"GSM\"\r\n");
+        WRITE_OK_STRING(out_buf, "\r\n+CSCS: \"UTF-8\"\r\n");
     else if(!strncmp(cmd, "ATV", 3)) //fake ok
         WRITE_OK(out_buf);
     else if(!strncmp(cmd, "AT&C", 4))
@@ -1039,6 +1039,68 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
             WRITE_ERROR(out_buf);
         }
     }
+    else if(!strcmp(cmd, "AT+CUSD=?"))
+        WRITE_OK_STRING(out_buf, "\r\n+CUSD: (1)\r\n");
+    else if(!strncmp(cmd, "AT+CUSD=1,\"", 11))
+    {
+        char* endquote = strchr(cmd+11, '"');
+        if(!endquote || (endquote-(cmd+11)) % 2)
+            WRITE_ERROR(out_buf);
+        else
+        {
+            size_t number_length = (endquote-(cmd+11)) / 2;
+            char* number = malloc(number_length + 1);
+            char* p = cmd + 11;
+            for(size_t i = 0; i < number_length; i++)
+            {
+                char buf[3] = {p[0], p[1], 0};
+                p += 2;
+                char* ep = NULL;
+                int value = strtol(buf, &ep, 16);
+                if(ep != buf + 2)
+                {
+                    endquote = NULL;
+                    break;
+                }
+                number[i] = value;
+            }
+            number[number_length] = 0;
+            if(!endquote)
+            {
+                free(number);
+                WRITE_ERROR(out_buf);
+            }
+            else
+            {
+                API_DEBUG("modem_ussd_send(\"%s\", %d)", number, dcs);
+                if(!modem_ussd_send(number))
+                {
+                    API_DEBUG(" = 0 (OK)\n");
+                    WRITE_OK(out_buf);
+                }
+                else
+                {
+                    API_DEBUG(" = ERROR\n");
+                    WRITE_ERROR(out_buf);
+                }
+                free(number);
+            }
+        }
+    }
+    else if(!strcmp(cmd, "AT+CUSD=2"))
+    {
+        API_DEBUG("modem_ussd_reset()");
+        if(!modem_ussd_reset())
+        {
+            API_DEBUG(" = 0 (OK)\n");
+            WRITE_OK(out_buf);
+        }
+        else
+        {
+            API_DEBUG(" = ERROR\n");
+            WRITE_ERROR(out_buf);
+        }
+    }
 #ifdef DEBUG_COMMAND
     else if(!strncmp(cmd, "AT+DEBUG=", 9))
     {
@@ -1260,6 +1322,27 @@ void modem_registration_status_update(void)
 {
     char* buf = NULL;
     format_creg_response("CGREG", &buf);
+    broadcast_notification(buf);
+    free(buf);
+}
+
+void modem_ussd_reply(int status, const char* message)
+{
+    char* buf = NULL;
+    if(!message)
+        asprintf(&buf, "\r\n+CUSD: %d\r\n", status);
+    else
+    {
+        buf = malloc(28 + 2 * strlen(message));
+        sprintf(buf, "\r\n+CUSD: %d,\"", status);
+        char* p = buf + strlen(buf);
+        while(*message)
+        {
+            sprintf(p, "%02X", (uint8_t)*message++);
+            p += 2;
+        }
+        memcpy(p, "\",15\r\n", 7);
+    }
     broadcast_notification(buf);
     free(buf);
 }

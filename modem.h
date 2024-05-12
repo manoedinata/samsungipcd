@@ -42,6 +42,16 @@ enum
     MODEM_REGISTRATION_MODE_MANUAL_AUTOMATIC = 4,
 };
 
+enum
+{
+    MODEM_USSD_NOTIFY = 0,
+    MODEM_USSD_REQUEST = 1,
+    MODEM_USSD_TERMINATED = 2,
+    MODEM_USSD_LOCAL_REPLY = 3,
+    MODEM_USSD_NOT_SUPPORTED = 4,
+    MODEM_USSD_TIMEOUT = 5,
+};
+
 //i don't understand any of these abbreviations, does sipc even provide this info?
 //in the comment = what modemmanager would classify this as
 enum
@@ -120,6 +130,13 @@ int modem_sms_get_incoming_pdu(int index, const char** pdu, size_t* pdu_size); /
 /* sms-related callbacks */
 void modem_sms_incoming(int index); //indices must be unique in one session
 
+/* ussd */
+int modem_ussd_send(const char* number);
+int modem_ussd_reset(void);
+
+/* ussd-related callbacks */
+void modem_ussd_reply(int status, const char* message);
+
 /* mobile internet */
 int modem_inet_set_apn(const char* apn);
 int modem_inet_set_username_password(const char* username, const char* password);
@@ -137,5 +154,4 @@ void modem_inet_disconnected(void);
 uint16_t ppp_crc(const char* data, size_t size);
 
 /* debug */
-
 void modem_debug(int key, int value); //ifdef DEBUG_COMMAND

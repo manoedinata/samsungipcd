@@ -328,6 +328,20 @@ int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
     return 0;
 }
 
+int modem_ussd_send(const char* number)
+{
+    printf("\rUSSD call started: %s\n> ", number);
+    fflush(stdout);
+    return 0;
+}
+
+int modem_ussd_reset(const char* number)
+{
+    printf("\rUSSD call terminated\n> ");
+    fflush(stdout);
+    return 0;
+}
+
 int modem_poll_poll(const struct modem_fd_set* a, const struct modem_fd_set* b)
 {
     static char* line = NULL;
@@ -343,7 +357,7 @@ int modem_poll_poll(const struct modem_fd_set* a, const struct modem_fd_set* b)
         while(l && line[l-1] == '\n')
             line[--l] = 0;
         if(!strcmp(line, "help"))
-            printf("Commands: help, answer, hangup, incoming, sms, quit\n");
+            printf("Commands: help, answer, hangup, incoming, sms, ussd, quit\n");
         else if(!strcmp(line, "answer"))
         {
             if(call_state == MODEM_CALL_STATE_DIALING)
@@ -417,6 +431,18 @@ int modem_poll_poll(const struct modem_fd_set* a, const struct modem_fd_set* b)
         }
         else if(!strcmp(line, "sms"))
             printf("Usage: sms <pdu>\n");
+        else if(!strncmp(line, "ussd ", 5))
+        {
+            int q = 0;
+            char* c = line + 5;
+            while(*c >= '0' && *c <= '9')
+                q = 10 * q + (*c++) - '0';
+            if(*c == ' ')
+                c++;
+            modem_ussd_reply(q, c);
+        }
+        else if(!strcmp(line, "ussd"))
+            printf("Usage: ussd <status> <data>\n");
         else if(!strcmp(line, "quit"))
             exit(0);
         else

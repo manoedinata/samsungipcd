@@ -1,5 +1,5 @@
 /*
-Copyright 2022 Sergey Lisov
+Copyright 2022-2024 Sergey Lisov
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
 
@@ -174,6 +174,7 @@ static int have_gprs;
 static int have_ipv6_link;
 static int rmnet_fd;
 static int packet_fd;
+static int ussd_active;
 
 static void update_one_owned(char** which, char* new_value)
 {
@@ -207,6 +208,7 @@ enum
     THREAD_REQ_TYPE_REGIST,
     THREAD_REQ_TYPE_DTMF_TONE,
     THREAD_REQ_TYPE_IMEI,
+    THREAD_REQ_TYPE_USSD,
 #ifdef DEBUG_COMMAND
     THREAD_REQ_TYPE_DEBUG,
 #endif
@@ -235,8 +237,7 @@ static const int channel_volumes[4][2] = {
     {IPC_SND_VOLUME_TYPE_BTVOICE, 0},
 };
 
-//XXX: we should not blindly trust data received from the modem
-//read-only buffer overflows still yield SIGSEGVs
+//XXX: length is 8-bit in many requests. we should probably check for overflow when creating them
 static void* sipc_thread(void* arg)
 {
     fcntl(thread_comm[1], F_SETFL, fcntl(thread_comm[1], F_GETFL) | O_NONBLOCK);
@@ -392,6 +393,16 @@ static void* sipc_thread(void* arg)
             }
             else if(ptr->type == THREAD_REQ_TYPE_DTMF_TONE)
                 ipc_client_send(fmt, seq_cntr++, IPC_CALL_CONT_DTMF, IPC_TYPE_SET, ptr->ptr, ptr->size);
+            else if(ptr->type == THREAD_REQ_TYPE_USSD)
+            {
+                struct ipc_ss_ussd_header* data = malloc(sizeof(*data) + ptr->size - 1);
+                data->state = ((char*)ptr->ptr)[0];
+                data->dcs = ((char*)ptr->ptr)[1];
+                data->length = ptr->size - 2;
+                memcpy(data + 1, (char*)ptr->ptr + 2, ptr->size - 2);
+                ipc_client_send(fmt, seq_cntr++, IPC_SS_USSD, IPC_TYPE_EXEC, data, sizeof(*data) + data->length);
+                free(data);
+            }
 #ifdef DEBUG_COMMAND
             else if(ptr->type == THREAD_REQ_TYPE_DEBUG)
             {
@@ -489,9 +500,22 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_GEN_PHONE_RES)
         {
             struct ipc_gen_phone_res_data* pld = msg.data;
-            if(ipc_gen_phone_res_check(msg.data))
-                printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
-            else if(IPC_COMMAND(GET(pld->group), GET(pld->index)) == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
+            int cmd = IPC_COMMAND(pld->group, pld->index);
+            if(msg.size < sizeof(*pld)){} //invalid packet
+            else if(ipc_gen_phone_res_check(msg.data))
+            {
+                if(cmd == IPC_SS_USSD)
+                {
+                    struct thread_req* req = malloc(sizeof(*req));
+                    req->type = THREAD_REQ_TYPE_USSD;
+                    req->ptr = NULL;
+                    req->size = 0;
+                    write(thread_comm[1], &req, sizeof(req));
+                }
+                else
+                    printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
+            }
+            else if(cmd == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
             {
                 struct ipc_gprs_pdp_context_request_set_data data;
                 char username[sizeof(data.username)];
@@ -555,7 +579,7 @@ static void* sipc_thread(void* arg)
             printf("\n");
             if((GET(data->field_flag) & 7) != 7)
             {
-                printf("gprs_ip_configuration without data, no idea what to do\n");
+                printf("gprs_ip_configuration with incomplete data, no idea what to do\n");
                 //disconnect the modem
                 struct ipc_gprs_pdp_context_request_set_data data;
                 char username[sizeof(data.username)] = {0};
@@ -720,6 +744,103 @@ static void* sipc_thread(void* arg)
                 write(thread_comm[1], &req, sizeof(req));
             }
         }
+        else if(msg.command == IPC_SS_USSD)
+        {
+            struct ipc_ss_ussd_header* data = msg.data;
+            if(msg.size >= sizeof(*data) && msg.size >= sizeof(*data) + data->length)
+            {
+                uint8_t* src = (void*)(data + 1);
+                uint8_t* ptr = NULL;
+                size_t size = 0;
+                if(data->dcs == 15) //7-bit encoding
+                {
+                    size = data->length * 8 / 7;
+                    ptr = malloc(size + 2);
+                    uint8_t* p = ptr;
+                    *p++ = data->state;
+                    size_t i;
+                    for(i = 0; i + 6 < data->length; i += 7)
+                    {
+                        *p++ = src[i] & 127;
+                        for(size_t j = 0; j < 6; j++)
+                            *p++ = ((src[i+j] >> (7 - j)) | (src[i+j+1] << (j + 1))) & 127;
+                        *p++ = src[i+6] >> 1;
+                    }
+                    if(i < data->length)
+                    {
+                        *p++ = src[i] & 127;
+                        for(size_t j = 0; j < data->length - i; j++)
+                            *p++ = ((src[i+j] >> (7 - j)) | (src[i+j+1] << (j + 1))) & 127;
+                    }
+                    *p++ = 0;
+                }
+                else if(data->dcs == 72 && data->length % 2 == 0) //utf-16
+                {
+                    size = 0;
+                    for(size_t i = 0; i < data->length; i += 2)
+                        if(!src[i] && src[i+1] < 128)
+                            size++;
+                        else if(src[i] < 8)
+                            size += 2;
+                        else if((src[i] & 0xfc) == 0xd8)
+                        {
+                            size += 4;
+                            i += 2;
+                            if(i >= data->length || (src[i] & 0xfc) != 0xdc)
+                                goto bad_encoding;
+                        }
+                        else if((src[i] & 0xfc) == 0xdc)
+                            goto bad_encoding;
+                        else
+                            size += 3;
+                    ptr = malloc(size + 2);
+                    uint8_t* p = ptr;
+                    *p++ = data->state;
+                    for(size_t i = 0; i < data->length; i += 2)
+                    {
+                        uint32_t codepoint = ((uint16_t)src[i] << 8) | src[i+1];
+                        if(codepoint >= 0xd800 && codepoint < 0xdc00)
+                        {
+                            codepoint &= 1023;
+                            codepoint <<= 10;
+                            i += 2;
+                            codepoint |= (src[2] & 3) << 8;
+                            codepoint |= src[i+1];
+                            codepoint += 65536;
+                        }
+                        if(codepoint < 128)
+                            *p++ = codepoint;
+                        else if(codepoint < 2048)
+                        {
+                            *p++ = 0xc0 | (codepoint >> 6);
+                            *p++ = 0x80 | (codepoint & 63);
+                        }
+                        else if(codepoint < 65536)
+                        {
+                            *p++ = 0xe0 | (codepoint >> 12);
+                            *p++ = 0x80 | ((codepoint >> 6) & 63);
+                            *p++ = 0x80 | (codepoint & 63);
+                        }
+                        else
+                        {
+                            *p++ = 0xf0 | (codepoint >> 18);
+                            *p++ = 0x80 | ((codepoint >> 12) & 63);
+                            *p++ = 0x80 | ((codepoint >> 6) & 63);
+                            *p++ = 0x80 | (codepoint & 63);
+                        }
+                    }
+                    *p++ = 0;
+                }
+                else
+                    goto bad_encoding;
+                struct thread_req* req = malloc(sizeof(*req));
+                req->type = THREAD_REQ_TYPE_USSD;
+                req->ptr = ptr;
+                req->size = size;
+                write(thread_comm[1], &req, sizeof(req));
+            bad_encoding:;
+            }
+        }
         // msg.command = 0x0b0d -> returns some JSON
 #undef PTRCHECK
 #undef GET
@@ -869,6 +990,16 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
             modem_registration_status_update();
         else if(cmd->type == THREAD_REQ_TYPE_IMEI)
             update_one_owned(&imei, cmd->ptr);
+        else if(cmd->type == THREAD_REQ_TYPE_USSD && !cmd->ptr)
+            modem_ussd_reply(MODEM_USSD_TIMEOUT, NULL);
+        else if(cmd->type == THREAD_REQ_TYPE_USSD)
+        {
+            int state = ((uint8_t*)cmd->ptr)[0] - 1;
+            char* contents = (char*)cmd->ptr + 1;
+            ussd_active = (state == MODEM_USSD_REQUEST);
+            modem_ussd_reply(state, contents);
+            free(cmd->ptr);
+        }
         free(cmd);
     }
     return 0;
@@ -1179,6 +1310,111 @@ int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
     }
     else
         return -1;
+}
+
+int modem_ussd_send(const char* name)
+{
+    size_t utf16_size = 0;
+    for(size_t i = 0; name[i]; i++)
+        if((uint8_t)name[i] >= 128)
+            utf16_size++;
+        else
+            utf16_size += 2;
+    uint8_t* ptr;
+    size_t size;
+    if(!name[utf16_size / 2]) //request is fully ascii, can encode as 7-bit
+    {
+        size_t l = utf16_size / 2;
+        size = (7 * l + 7) / 8;
+        ptr = malloc(size + 2);
+        uint8_t* p = ptr;
+        *p++ = ussd_active ? 2 : 1;
+        *p++ = 15;
+        size_t i;
+        for(i = 0; i + 7 < l; i += 8)
+            for(size_t j = 0; j < 7; j++)
+                *p++ = ((uint8_t)name[i+j] >> j) | ((uint8_t)name[i+j+1] << (7 - j));
+        if(i < l)
+            for(size_t j = 0; j < l - i; j++)
+                *p++ = ((uint8_t)name[i+j] >> j) | ((uint8_t)name[i+j+1] << (7 - j));
+        size += 2;
+    }
+    else //encode as utf-16
+    {
+        ptr = malloc(utf16_size + 2);
+        uint8_t* p = ptr;
+        *p++ = ussd_active ? 2 : 1;
+        *p++ = 72;
+        for(size_t i = 0; name[i]; i++)
+        {
+            uint8_t q = name[i];
+            if(q < 128)
+            {
+                *p++ = q;
+                continue;
+            }
+            else if(q < 192 || q >= 254)
+            {
+                free(ptr);
+                return -1;
+            }
+            int n_bytes;
+            if(q >= 252)
+                n_bytes = 6;
+            else if(q >= 248)
+                n_bytes = 5;
+            else if(q >= 240)
+                n_bytes = 4;
+            else if(q >= 216)
+                n_bytes = 3;
+            else
+                n_bytes = 2;
+            uint32_t value = q & ((1 << (7 - n_bytes)) - 1);
+            for(int j = 1; j < n_bytes; j++)
+            {
+                q = name[++i];
+                if(q < 128 || q >= 192)
+                {
+                    free(ptr);
+                    return -1;
+                }
+                value = value << 6 | (q & 63);
+            }
+            if(value >= 0x110000)
+            {
+                free(ptr);
+                return -1;
+            }
+            else if(value >= 0x10000)
+            {
+                value -= 0x10000;
+                *p++ = 0xd8 | (value >> 18);
+                *p++ = value >> 10;
+                *p++ = 0xdc | ((value >> 8) & 3);
+                *p++ = value;
+            }
+            else
+            {
+                *p++ = value >> 8;
+                *p++ = value;
+            }
+        }
+        size = p - ptr;
+    }
+    struct thread_req* req = malloc(sizeof(*req));
+    req->type = THREAD_REQ_TYPE_USSD;
+    req->ptr = ptr;
+    req->size = size;
+    if(write(thread_comm[0], &req, sizeof(req)) != sizeof(req))
+        return -1;
+    //we do not check for errors here. if ussd fails, we report it as termination from the modem
+    return 0;
+}
+
+int modem_ussd_reset(void)
+{
+    ussd_active = 0;
+    return 0;
 }
 
 #ifdef DEBUG_COMMAND
