@@ -728,6 +728,10 @@ static void* sipc_thread(void* arg)
                 .type = IPC_MISC_ME_SN_SERIAL_NUM,
             };
             ipc_client_send(fmt, seq_cntr++, IPC_MISC_ME_SN, IPC_TYPE_GET, &data, sizeof(data));
+            struct ipc_net_mode_sel_data data1 = {
+                .mode_sel = IPC_NET_MODE_SEL_UMTS_ONLY,
+            };
+            ipc_client_send(fmt, seq_cntr++, IPC_NET_MODE_SEL, IPC_TYPE_SET, &data1, sizeof(data1));
         }
         else if(msg.command == IPC_MISC_ME_SN)
         {
@@ -1380,7 +1384,7 @@ int modem_ussd_send(const char* name)
                 }
                 value = value << 6 | (q & 63);
             }
-            if(value >= 0x110000)
+            if(value >= 0x110000 || (value & 0xfff800) == 0xd800)
             {
                 free(ptr);
                 return -1;
