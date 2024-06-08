@@ -257,6 +257,8 @@ static void* sipc_thread(void* arg)
     write(thread_comm[1], &ans, sizeof(ans));
     char* smsc_addr = NULL;
     size_t smsc_addr_len = 0;
+    int mode_probe_bit = 0;
+    int mode_current = 0;
     for(;;)
     {
         int rdfd = thread_comm[1];
@@ -500,33 +502,50 @@ static void* sipc_thread(void* arg)
         else if(msg.command == IPC_GEN_PHONE_RES)
         {
             struct ipc_gen_phone_res_data* pld = msg.data;
-            int cmd = IPC_COMMAND(pld->group, pld->index);
-            if(msg.size < sizeof(*pld)){} //invalid packet
-            else if(ipc_gen_phone_res_check(msg.data))
+            if(msg.size >= sizeof(*pld)) //is packet valid?
             {
-                if(cmd == IPC_SS_USSD)
+                int cmd = IPC_COMMAND(pld->group, pld->index);
+                if(cmd == IPC_NET_MODE_SEL)
                 {
-                    struct thread_req* req = malloc(sizeof(*req));
-                    req->type = THREAD_REQ_TYPE_USSD;
-                    req->ptr = NULL;
-                    req->size = 0;
-                    write(thread_comm[1], &req, sizeof(req));
+                    int failed = (pld->code & 1); //different from normal success check
+                    if(!failed)
+                        mode_current |= 1 << mode_probe_bit;
+                    if(++mode_probe_bit < 8)
+                    {
+                        struct ipc_net_mode_sel_data data = {
+                            .mode_sel = mode_current | (1 << mode_probe_bit),
+                        };
+                        ipc_client_send(fmt, seq_cntr++, IPC_NET_MODE_SEL, IPC_TYPE_SET, &data, sizeof(data));
+                    }
+                    else
+                        printf("mode probe: supported modes = %d\n", mode_current);
                 }
-                else
-                    printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
-            }
-            else if(cmd == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
-            {
-                struct ipc_gprs_pdp_context_request_set_data data;
-                char username[sizeof(data.username)];
-                char password[sizeof(data.password)];
-                LOCKED()
+                else if(ipc_gen_phone_res_check(msg.data))
                 {
-                    strncpy(username, gprs_username, sizeof(username));
-                    strncpy(password, gprs_password, sizeof(password));
+                    if(cmd == IPC_SS_USSD)
+                    {
+                        struct thread_req* req = malloc(sizeof(*req));
+                        req->type = THREAD_REQ_TYPE_USSD;
+                        req->ptr = NULL;
+                        req->size = 0;
+                        write(thread_comm[1], &req, sizeof(req));
+                    }
+                    else
+                        printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
                 }
-                ipc_gprs_pdp_context_request_set_setup(&data, 1, 1, username, password);
-                ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+                else if(cmd == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
+                {
+                    struct ipc_gprs_pdp_context_request_set_data data;
+                    char username[sizeof(data.username)];
+                    char password[sizeof(data.password)];
+                    LOCKED()
+                    {
+                        strncpy(username, gprs_username, sizeof(username));
+                        strncpy(password, gprs_password, sizeof(password));
+                    }
+                    ipc_gprs_pdp_context_request_set_setup(&data, 1, 1, username, password);
+                    ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+                }
             }
         }
         else if(msg.command == IPC_SMS_DEVICE_READY)
@@ -729,7 +748,15 @@ static void* sipc_thread(void* arg)
             };
             ipc_client_send(fmt, seq_cntr++, IPC_MISC_ME_SN, IPC_TYPE_GET, &data, sizeof(data));
             struct ipc_net_mode_sel_data data1 = {
-                .mode_sel = IPC_NET_MODE_SEL_UMTS_ONLY,
+                //libsamsung-ipc constants are misleading. actually this seems to be a bitfield
+                //1 = GSM
+                //2 = 3G
+                //4 = unused
+                //8 = 4G
+                //32 = unused
+                //16, 64, 128 = unsupported, error if attempted to set
+                //future modems may support more modes, so we probe the modem and enable all supported modes
+                .mode_sel = 1 << mode_probe_bit,
             };
             ipc_client_send(fmt, seq_cntr++, IPC_NET_MODE_SEL, IPC_TYPE_SET, &data1, sizeof(data1));
         }
