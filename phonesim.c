@@ -255,6 +255,11 @@ int modem_sms_get_incoming_pdu(int index, const char** pdu, size_t* pdu_size)
     return 1;
 }
 
+int modem_inet_supports_protocol(int proto)
+{
+    return proto == MODEM_PPP_PROTOCOL_IPV4 || proto == MODEM_PPP_PROTOCOL_IPV6;
+}
+
 int modem_inet_set_apn(const char* apn)
 {
     printf("\rAPN: %s\n> ", apn);
@@ -335,7 +340,7 @@ int modem_ussd_send(const char* number)
     return 0;
 }
 
-int modem_ussd_reset(const char* number)
+int modem_ussd_reset(void)
 {
     printf("\rUSSD call terminated\n> ");
     fflush(stdout);

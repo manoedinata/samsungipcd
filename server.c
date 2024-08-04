@@ -199,6 +199,7 @@ struct conn_status
     int sms_nr;
     int is_ppp;
     int want_retry;
+    int ppp_protocols;
 };
 
 static int unescape_ppp(char* ppp, size_t* p_sz)
@@ -282,7 +283,16 @@ static void ppp_crc_fix(char* ppp, size_t ppp_size)
     ppp[ppp_size-1] = (char)(crc >> 8);
 }
 
-static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
+//internal enum to facilitate storing protocols in a bitmask
+//PPP protocol numbers are used for the API instead of these
+enum
+{
+    MODEM_PROTOCOL_IPV4 = 1 << 0,
+    MODEM_PROTOCOL_IPV6 = 1 << 1,
+};
+static const int PPP_PROTOCOLS[2] = {MODEM_PPP_PROTOCOL_IPV4, MODEM_PPP_PROTOCOL_IPV6};
+
+static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size, int protocols)
 {
     if(!ppp)
         return 0;
@@ -411,7 +421,7 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
         ppp = escape_ppp(ppp, &ppp_size, &ppp_cap);
         out_buf_write(out_buf, ppp, ppp_size);
     }
-    else if(protocol == 0x8021 /* IPCP */)
+    else if(protocol == 0x8021 /* IPCP */ && (protocols & MODEM_PROTOCOL_IPV4))
     {
         if(pkt_size < 4)
         {
@@ -519,7 +529,7 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             out_buf_write(out_buf, ppp, ppp_size);
         }
     }
-    else if(protocol == 0x8057 /* IPV6CP */)
+    else if(protocol == 0x8057 /* IPV6CP */ && (protocols & MODEM_PROTOCOL_IPV6))
     {
         if(pkt_size < 4)
         {
@@ -583,7 +593,7 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
                 memcpy(ppp2, ppp, ppp2_size);
                 //in our configure-req we pretend to be another node, so we must use a different id
                 char* pkt2 = ppp2 + 4;
-                for(size_t i = 4; i + 1 < l; i += (uint8_t)pkt[i+i])
+                for(size_t i = 4; i + 1 < l; i += (uint8_t)pkt[i+1])
                     if(pkt2[i] == 1 && pkt2[i+1] == 10)
                         pkt2[i+9] ^= 1;
                 ppp_crc_fix(ppp2, ppp2_size);
@@ -597,14 +607,19 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size)
             out_buf_write(out_buf, ppp, ppp_size);
         }
     }
-    else if(protocol == 0x21 /* IPv4 */ || protocol == 0x57 /* IPv6 */)
+    else if((protocol == 0x21 /* IPv4 */ && (protocols & MODEM_PROTOCOL_IPV4))
+         || (protocol == 0x57 /* IPv6 */ && (protocols & MODEM_PROTOCOL_IPV6)))
     {
-        if(pkt_size < 4 || ((uint8_t)pkt[0] & 0xf0) != 0x40)
+        if(pkt_size < 4 || ((uint8_t)pkt[0] & 0xf0) != (protocol == 0x21 ? 0x40 : 0x60))
         {
             free(ppp);
             return 0;
         }
-        size_t sz = (uint16_t)(uint8_t)pkt[2] << 8 | (uint8_t)pkt[3];
+        size_t sz;
+        if(protocol == 0x21)
+            sz = (uint16_t)(uint8_t)pkt[2] << 8 | (uint8_t)pkt[3];
+        else
+            sz = (uint32_t)((uint8_t)pkt[4] << 8 | (uint8_t)pkt[5]) + 40;
         if(sz > pkt_size)
             sz = pkt_size;
         API_DEBUG("modem_inet_send_packet(%d, %p, %zd)\n", protocol, pkt, sz);
@@ -639,6 +654,21 @@ static int format_creg_response(const char* resp_name, char** buf)
         return asprintf(buf, "\r\n+%s: 1,%d,\"%04X\",\"%08X\"\r\n\r\nOK\r\n", resp_name, state, lac, cid);
     else
         return asprintf(buf, "\r\n+%s: 1,%d,\"%04X\",\"%08X\",%d\r\n\r\nOK\r\n", resp_name, state, lac, cid, act);
+}
+
+static const char* get_cgdcont_pdp_type(void)
+{
+    int mask = 0;
+    for(size_t i = 0; i < sizeof(PPP_PROTOCOLS) / sizeof(*PPP_PROTOCOLS); i++)
+    {
+        API_DEBUG("modem_inet_supports_protocol(0x%x)", PPP_PROTOCOLS[i]);
+        int status = modem_inet_supports_protocol(PPP_PROTOCOLS[i]);
+        API_DEBUG(" = %d\n", status);
+        if(status)
+            mask |= 1 << i;
+    }
+    static const char* names[1 << (sizeof(PPP_PROTOCOLS) / sizeof(*PPP_PROTOCOLS))] = {"", "IP", "IPV6", "IPV4V6"};
+    return names[mask];
 }
 
 static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, char* cmd)
@@ -982,24 +1012,74 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
     else if(!strncmp(cmd, "ATZ", 3))
         WRITE_OK(out_buf);
     else if(!strcmp(cmd, "AT+CGDCONT=?"))
-        WRITE_OK_STRING(out_buf, "\r\n+CGDCONT: (1),\"IP\",,,(0),(0)\r\n");
-    else if(!strncmp(cmd, "AT+CGDCONT=1,\"IP\",\"", 19))
     {
-        //TODO: string unescape
-        char* apn = cmd+19;
-        char* quote = strchr(apn, '"');
-        if(quote)
-            *quote = 0;
-        API_DEBUG("modem_inet_set_apn(\"%s\")", apn);
-        if(!modem_inet_set_apn(apn))
+        char* msg = NULL;
+        int len = asprintf(&msg, "\r\n+CGDCONT: (1),\"%s\",,,(0),(0)\r\n", get_cgdcont_pdp_type());
+        out_buf_write(out_buf, msg, len);
+        free(msg);
+        WRITE_OK(out_buf);
+    }
+    else if(!strncmp(cmd, "AT+CGDCONT=1,\"IP", 16))
+    {
+        int mask = MODEM_PROTOCOL_IPV4;
+        char* apn;
+        if(cmd[16] == 'V')
         {
-            API_DEBUG(" = 0 (OK)\n");
-            WRITE_OK(out_buf);
+            if(cmd[17] == '6')
+            {
+                if(!strncmp(cmd+18, "\",\"", 3))
+                {
+                    mask = MODEM_PROTOCOL_IPV6;
+                    apn = cmd+21;
+                }
+                else
+                    mask = -1;
+            }
+            else if(cmd[17] == '4')
+            {
+                if(cmd[18] == 'V')
+                {
+                    if(!strncmp(cmd+19, "6\",\"", 4))
+                    {
+                        mask |= MODEM_PROTOCOL_IPV6;
+                        apn = cmd+23;
+                    }
+                    else
+                        mask = -1;
+                }
+                else if(!strncmp(cmd+18, "\",\"", 3))
+                    apn = cmd+21;
+                else
+                    mask = -1;
+            }
+            else
+                mask = -1;
         }
+        else if(!strncmp(cmd+16, "\",\"", 3))
+            apn = cmd+19;
+        else
+            mask = -1;
+        if(mask < 0)
+            WRITE_ERROR(out_buf);
         else
         {
-            API_DEBUG(" = ERROR\n");
-            WRITE_ERROR(out_buf);
+            st->ppp_protocols = mask;
+            //TODO: string unescape
+            char* apn = cmd+19;
+            char* quote = strchr(apn, '"');
+            if(quote)
+                *quote = 0;
+            API_DEBUG("modem_inet_set_apn(\"%s\")", apn);
+            if(!modem_inet_set_apn(apn))
+            {
+                API_DEBUG(" = 0 (OK)\n");
+                WRITE_OK(out_buf);
+            }
+            else
+            {
+                API_DEBUG(" = ERROR\n");
+                WRITE_ERROR(out_buf);
+            }
         }
     }
     else if(!strcmp(cmd, "AT+CGDCONT?"))
@@ -1013,7 +1093,7 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         {
             //TODO: string escape
             char* msg = NULL;
-            int len = asprintf(&msg, "\r\n+CGDCONT: 1,\"IP\",\"%s\",\"10.10.10.10\",0,0\r\n\r\nOK\r\n", apn);
+            int len = asprintf(&msg, "\r\n+CGDCONT: 1,\"%s\",\"%s\",\"10.10.10.10\",0,0\r\n\r\nOK\r\n", get_cgdcont_pdp_type(), apn);
             out_buf_write(out_buf, msg, len);
             free(msg);
         }
@@ -1072,7 +1152,7 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
             }
             else
             {
-                API_DEBUG("modem_ussd_send(\"%s\", %d)", number, dcs);
+                API_DEBUG("modem_ussd_send(\"%s\")", number);
                 if(!modem_ussd_send(number))
                 {
                     API_DEBUG(" = 0 (OK)\n");
@@ -1149,7 +1229,7 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
     {
         if(st->is_ppp)
         {
-            if(handle_ppp(out_buf, cmd, ppp_size))
+            if(handle_ppp(out_buf, cmd, ppp_size, st->ppp_protocols))
             {
                 st->is_ppp = 0;
                 n_ppp--;

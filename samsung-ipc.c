@@ -174,6 +174,8 @@ static int have_gprs;
 static int have_ipv6_link;
 static int rmnet_fd;
 static int packet_fd;
+static int rmnet_fd_v6;
+static int packet_fd_v6;
 static int ussd_active;
 
 static void update_one_owned(char** which, char* new_value)
@@ -218,6 +220,15 @@ static uint8_t seq_cntr = 0;
 
 static int ifdownup(void)
 {
+    int fd = open("/proc/sys/net/ipv6/conf/" INTERFACE_NAME "/autoconf", O_WRONLY);
+    if(fd < 0)
+        return -1;
+    if(write(fd, "0\n", 2) != 2)
+    {
+        close(fd);
+        return -1;
+    }
+    close(fd);
     struct ifreq ifr = { .ifr_name = INTERFACE_NAME };
     if(ioctl(rmnet_fd, SIOCGIFFLAGS, &ifr))
         return -1;
@@ -623,8 +634,6 @@ static void* sipc_thread(void* arg)
                     memcpy(gprs_ip, PTRCHECK(data->ip, 4, stub_ip), 4);
                     memcpy(gprs_dns1, PTRCHECK(data->dns1, 4, stub_ip), 4);
                     memcpy(gprs_dns2, PTRCHECK(data->dns2, 4, stub_ip), 4);
-#if 0
-                    //this doesn't actually work yet
                     char* ipv6_link_local = (char*)data + 35;
                     if(!memcmp(PTRCHECK(ipv6_link_local, 8, stub_ip), "\xfe\x80\x00\x00\x00\x00\x00", 8))
                     {
@@ -633,7 +642,6 @@ static void* sipc_thread(void* arg)
                     }
                     else
                         have_ipv6_link = 0;
-#endif
                     /*printf("ip = 0x%x\n", *(int*)data->ip);
                     printf("dns1 = 0x%x\n", *(int*)data->dns1);
                     printf("dns2 = 0x%x\n", *(int*)data->dns2);*/
@@ -880,12 +888,12 @@ static void* sipc_thread(void* arg)
     return 0;
 }
 
-static int open_rmnet(void)
+static int open_rmnet(int family)
 {
     struct ifreq ifr = {
         .ifr_name = INTERFACE_NAME,
     };
-    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    int sock = socket(family, SOCK_RAW, IPPROTO_RAW);
     if(sock < 0)
         return -1;
     if(setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, INTERFACE_NAME, sizeof(INTERFACE_NAME)-1))
@@ -897,7 +905,7 @@ static int open_rmnet(void)
     return sock;
 }
 
-static int open_packet(void)
+static int open_packet(int eth_proto)
 {
     struct ifreq ifr = {
         .ifr_name = INTERFACE_NAME,
@@ -906,7 +914,7 @@ static int open_packet(void)
         .sll_family = AF_PACKET,
         .sll_protocol = 0,
     };
-    int sock = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+    int sock = socket(AF_PACKET, SOCK_DGRAM, htons(eth_proto));
     if(sock < 0)
         return -1;
     if(ioctl(sock, SIOCGIFINDEX, &ifr)
@@ -934,14 +942,20 @@ int modem_init(void)
     int status;
     if(waitpid(p, &status, 0) != p || status)
         return -1;
-    rmnet_fd = open_rmnet();
+    rmnet_fd = open_rmnet(AF_INET);
     if(rmnet_fd < 0)
         return -1;
+    rmnet_fd_v6 = open_rmnet(AF_INET6);
+    if(rmnet_fd_v6 < 0)
+        return -1;
 #ifdef REVERSE_PACKET_FORWARDING
-    packet_fd = open_packet();
+    packet_fd = open_packet(ETH_P_IP);
     if(packet_fd < 0)
         return -1;
 #endif
+    packet_fd_v6 = open_packet(ETH_P_IPV6);
+    if(packet_fd_v6 < 0)
+        return -1;
     pthread_mutex_init(&global_lock, NULL);
     pthread_mutex_init(&sms_storage_lock, NULL);
     if(socketpair(AF_UNIX, SOCK_STREAM, 0, thread_comm))
@@ -962,6 +976,7 @@ int modem_poll_update_fds(struct modem_fd_set* rs, struct modem_fd_set* ws)
 #ifdef REVERSE_PACKET_FORWARDING
     modem_poll_fd_set(packet_fd, rs);
 #endif
+    modem_poll_fd_set(packet_fd_v6, rs);
     return 0;
 }
 
@@ -976,6 +991,29 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
             modem_inet_incoming_packet(MODEM_PPP_PROTOCOL_IPV4, buf, sz);
     }
 #endif
+    if(rs && modem_poll_fd_isset(packet_fd_v6, rs))
+    {
+        char buf[1500];
+        ssize_t sz;
+        while((sz = read(packet_fd_v6, buf, sizeof(buf))) >= 0)
+        {
+#ifndef REVERSE_PACKET_FORWARDING
+            if(sz <= 6)
+                continue;
+            size_t pos = 40;
+            uint8_t kind = buf[6];
+            //handle extended headers
+            while(pos + 1 < sz && (kind == 0 || kind == 43 || kind == 60))
+            {
+                kind = buf[pos];
+                pos += 2 + (uint8_t)buf[pos+1];
+            }
+            if(kind != 58 /* ICMPv6 */)
+                continue;
+#endif
+            modem_inet_incoming_packet(MODEM_PPP_PROTOCOL_IPV6, buf, sz);
+        }
+    }
     if(rs && !modem_poll_fd_isset(thread_comm[0], rs))
         return 0;
     struct thread_req* cmd;
@@ -1269,6 +1307,11 @@ int modem_sms_get_incoming_pdu(int index, const char** pdu, size_t* pdu_size)
     return ans;
 }
 
+int modem_inet_supports_protocol(int proto)
+{
+    return proto == MODEM_PPP_PROTOCOL_IPV4 || proto == MODEM_PPP_PROTOCOL_IPV6;
+}
+
 int modem_inet_set_apn(const char* apn)
 {
     LOCKED() update_one(&gprs_apn, apn);
@@ -1338,6 +1381,14 @@ int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
         struct sockaddr_in dst = { .sin_family = AF_INET };
         memcpy(&dst.sin_addr.s_addr, pkt+16, 4);
         return sendto(rmnet_fd, pkt, sz, 0, (void*)&dst, sizeof(dst)) == sz;
+    }
+    else if(protocol == MODEM_PPP_PROTOCOL_IPV6)
+    {
+        if(sz < 40)
+            return -1;
+        struct sockaddr_in6 dst = { .sin6_family = AF_INET6 };
+        memcpy(&dst.sin6_addr, pkt+24, 16);
+        return sendto(rmnet_fd_v6, pkt, sz, 0, (void*)&dst, sizeof(dst)) == sz;
     }
     else
         return -1;

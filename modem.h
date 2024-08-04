@@ -138,6 +138,7 @@ int modem_ussd_reset(void);
 void modem_ussd_reply(int status, const char* message);
 
 /* mobile internet */
+int modem_inet_supports_protocol(int protocol);
 int modem_inet_set_apn(const char* apn);
 int modem_inet_set_username_password(const char* username, const char* password);
 const char* modem_inet_get_apn(void);
