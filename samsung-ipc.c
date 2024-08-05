@@ -270,6 +270,7 @@ static void* sipc_thread(void* arg)
     size_t smsc_addr_len = 0;
     int mode_probe_bit = 0;
     int mode_current = 0;
+    int modem_supports_ipv6 = 0;
     for(;;)
     {
         int rdfd = thread_comm[1];
@@ -319,8 +320,15 @@ static void* sipc_thread(void* arg)
                     struct ipc_gprs_define_pdp_context_data data;
                     char apn[sizeof(data.apn)] = {0};
                     LOCKED()
+                    {
                         strncpy(apn, gprs_apn, sizeof(apn));
+                        //assume the best once again, in case the previous probe request failed due to some other error
+                    }
+                    modem_supports_ipv6 = 1;
                     ipc_gprs_define_pdp_context_setup(&data, 1, 1, apn);
+                    //if the modem doesn't support ipv6, it will probably respond with an error
+                    //we'll then retry the request without this assignment to get ipv4 connectivity
+                    data.magic = 6;
                     ipc_client_send(fmt, seq_cntr++, IPC_GPRS_DEFINE_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
                 }
                 if(!enabled && need_gprs)
@@ -531,6 +539,36 @@ static void* sipc_thread(void* arg)
                     else
                         printf("mode probe: supported modes = %d\n", mode_current);
                 }
+                else if(cmd == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
+                {
+                    int failed = (pld->code & 1); //same custom check as above
+                    if(failed && modem_supports_ipv6)
+                    {
+                        struct ipc_gprs_define_pdp_context_data data;
+                        char apn[sizeof(data.apn)] = {0};
+                        LOCKED()
+                        {
+                            strncpy(apn, gprs_apn, sizeof(apn));
+                            modem_supports_ipv6 = 0;
+                        }
+                        ipc_gprs_define_pdp_context_setup(&data, 1, 1, apn);
+                        ipc_client_send(fmt, seq_cntr++, IPC_GPRS_DEFINE_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+                        modem_supports_ipv6 = 0;
+                    }
+                    else
+                    {
+                        struct ipc_gprs_pdp_context_request_set_data data;
+                        char username[sizeof(data.username)];
+                        char password[sizeof(data.password)];
+                        LOCKED()
+                        {
+                            strncpy(username, gprs_username, sizeof(username));
+                            strncpy(password, gprs_password, sizeof(password));
+                        }
+                        ipc_gprs_pdp_context_request_set_setup(&data, 1, 1, username, password);
+                        ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
+                    }
+                }
                 else if(ipc_gen_phone_res_check(msg.data))
                 {
                     if(cmd == IPC_SS_USSD)
@@ -543,19 +581,6 @@ static void* sipc_thread(void* arg)
                     }
                     else
                         printf("warning: received IPC_GEN_PHONE_RES with failure status\n");
-                }
-                else if(cmd == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
-                {
-                    struct ipc_gprs_pdp_context_request_set_data data;
-                    char username[sizeof(data.username)];
-                    char password[sizeof(data.password)];
-                    LOCKED()
-                    {
-                        strncpy(username, gprs_username, sizeof(username));
-                        strncpy(password, gprs_password, sizeof(password));
-                    }
-                    ipc_gprs_pdp_context_request_set_setup(&data, 1, 1, username, password);
-                    ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
                 }
             }
         }
@@ -1387,7 +1412,7 @@ int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
         if(sz < 40)
             return -1;
         struct sockaddr_in6 dst = { .sin6_family = AF_INET6 };
-        memcpy(&dst.sin6_addr, pkt+24, 16);
+        memcpy(&dst.sin6_addr, "\xff\x02\0\0\0\0\0\0\0\0\0\0\x00\x02", 16);
         return sendto(rmnet_fd_v6, pkt, sz, 0, (void*)&dst, sizeof(dst)) == sz;
     }
     else
