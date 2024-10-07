@@ -75,7 +75,7 @@ static void* ppp_thread(void* o)
                 ppp_packet = in_buf_pop_ppp(&in_buf, &sz, 0);
                 if(!ppp_packet)
                     break;
-                if(unescape_ppp(ppp_packet, &sz) || sz < 4 || !ppp_crc_valid(ppp_packet, sz) || (uint8_t)ppp_packet[0] != 0xff || (uint8_t)ppp_packet[1] != 3)
+                if(unescape_ppp(ppp_packet, &sz) || sz <= 4 || !ppp_crc_valid(ppp_packet, sz) || (uint8_t)ppp_packet[0] != 0xff || (uint8_t)ppp_packet[1] != 3)
                 {
                     free(ppp_packet);
                     ppp_packet = 0;
