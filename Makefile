@@ -23,3 +23,4 @@ install:
 
 uninstall:
 	rm -f $(PREFIX)/sbin/samsungipcd
+	rm -f $(PREFIX)/share/samsungipcd/ppp-hook.so
