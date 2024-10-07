@@ -12,7 +12,7 @@ samsungipcd-sim: server.c ppp_crc.o phonesim.c modem.h buffers.h
 	gcc -DPREFIX='"$(PREFIX)"' server.c ppp_crc.o phonesim.c -o $@
 
 ppp-hook.so: ppp_hook.c ppp_crc.o
-	gcc -DPREFIX='"$(PREFIX)"' ppp_hook.c ppp_crc.o -fPIE -fPIC -shared -pthread -o ppp-hook.so -O0 -g -DPPP_DUMP
+	gcc -DPREFIX='"$(PREFIX)"' ppp_hook.c ppp_crc.o -fPIE -fPIC -shared -pthread -o ppp-hook.so
 
 clean:
 	rm -f samsungipcd samsungipcd-sim ppp_crc.o
