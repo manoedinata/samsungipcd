@@ -1412,7 +1412,7 @@ int modem_inet_send_packet(int protocol, const char* pkt, size_t sz)
         if(sz < 40)
             return -1;
         struct sockaddr_in6 dst = { .sin6_family = AF_INET6 };
-        memcpy(&dst.sin6_addr, "\xff\x02\0\0\0\0\0\0\0\0\0\0\x00\x02", 16);
+        memcpy(&dst.sin6_addr, "\xff\x02\0\0\0\0\0\0\0\0\0\0\0\0\x00\x02", 16);
         return sendto(rmnet_fd_v6, pkt, sz, 0, (void*)&dst, sizeof(dst)) == sz;
     }
     else
