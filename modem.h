@@ -88,7 +88,6 @@ int modem_poll_update_fds(struct modem_fd_set* rdset, struct modem_fd_set* wrset
 int modem_poll_poll(const struct modem_fd_set* rdset, const struct modem_fd_set* wrset);
 
 /* polling callbacks */
-
 void modem_poll_fd_set(int fd, struct modem_fd_set* set);
 void modem_poll_fd_clr(int fd, struct modem_fd_set* set);
 int modem_poll_fd_isset(int fd, const struct modem_fd_set* set);
@@ -109,7 +108,6 @@ void modem_registration_get_cell_info(int* act, int* lac, int* cid, int* tac); /
 double modem_registration_get_error_rate(void); //-1 for unknown
 
 /* registration-related callbacks */
-
 void modem_registration_status_update(void);
 
 /* calls */
@@ -153,6 +151,7 @@ void modem_inet_disconnected(void);
 
 /* utility */
 uint16_t ppp_crc(const char* data, size_t size);
+void schedule_job(uint64_t after_nsec, int(*callback)(void*), void* opaque);
 
 /* debug */
 void modem_debug(int key, int value); //ifdef DEBUG_COMMAND

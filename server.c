@@ -1,5 +1,5 @@
 /*
-Copyright 2022-2024 Sergey Lisov
+Copyright 2022-2025 Sonya Sireneva
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
 
@@ -22,6 +22,7 @@ You should have received a copy of the GNU General Public License along with thi
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <time.h>
 
 int n_total = 0;
 int n_ppp = 0;
@@ -776,7 +777,7 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         API_DEBUG("modem_call_send_dtmf('%c')", key);
         if(!modem_call_send_dtmf(key))
         {
-            API_DEBUG("= 0 (OK)\n");
+            API_DEBUG(" = 0 (OK)\n");
             WRITE_OK(out_buf);
         }
         else
@@ -1138,6 +1139,168 @@ struct client_conn* connections[FD_SETSIZE] = {0};
 struct modem_fd_set rdsocks;
 struct modem_fd_set wrsocks;
 
+struct scheduled_job
+{
+    struct timespec when;
+    uint64_t interval;
+    int(*callback)(void*);
+    void* opaque;
+};
+
+struct scheduled_job** job_queue;
+size_t job_queue_size, job_queue_cap;
+enum { MIN_JOB_QUEUE_CAP = 128 }; //will probably never overflow this limit...
+
+static int timespec_cmp(const struct timespec* a, const struct timespec* b)
+{
+    if(a->tv_sec < b->tv_sec)
+        return -1;
+    if(a->tv_sec > b->tv_sec)
+        return 1;
+    if(a->tv_nsec < b->tv_nsec)
+        return -1;
+    if(a->tv_nsec > b->tv_nsec)
+        return 1;
+    return 0;
+}
+
+static void sift_up(size_t i)
+{
+    while(i > 0)
+    {
+        size_t parent = (i - 1) / 2;
+        if(timespec_cmp(&job_queue[parent]->when, &job_queue[i]->when) > 0)
+        {
+            struct scheduled_job* tmp = job_queue[i];
+            job_queue[i] = job_queue[parent];
+            job_queue[parent] = tmp;
+        }
+        i = parent;
+    }
+}
+
+static void push_job(struct scheduled_job* job)
+{
+    if(job_queue_size == job_queue_cap)
+    {
+        size_t new_cap = job_queue_cap * 2;
+        job_queue = realloc(job_queue, sizeof(*job_queue) * new_cap);
+        job_queue_cap = new_cap;
+    }
+    size_t i = job_queue_size++;
+    job_queue[i] = job;
+    sift_up(i);
+}
+
+static struct scheduled_job* pop_job(void)
+{
+    size_t i = 0;
+    while(2*i+2 < job_queue_size)
+    {
+        size_t child = timespec_cmp(&job_queue[2*i+1]->when, &job_queue[2*i+2]->when) < 0 ? 2*i+1 : 2*i+2;
+        struct scheduled_job* tmp = job_queue[i];
+        job_queue[i] = job_queue[child];
+        job_queue[child] = tmp;
+        i = child;
+    }
+    if(2*i+1 < job_queue_size)
+    {
+        struct scheduled_job* tmp = job_queue[i];
+        job_queue[i] = job_queue[2*i+1];
+        job_queue[2*i+1] = tmp;
+        i = 2*i+1;
+    }
+    struct scheduled_job* ans = job_queue[i];
+    if(i != job_queue_size - 1)
+    {
+        job_queue[i] = job_queue[job_queue_size-1];
+        sift_up(i);
+    }
+    job_queue_size--;
+    if(job_queue_size * 2 < job_queue_cap)
+    {
+        size_t new_cap = job_queue_size;
+        if(new_cap < MIN_JOB_QUEUE_CAP)
+            new_cap = MIN_JOB_QUEUE_CAP;
+        if(new_cap < job_queue_cap)
+        {
+            job_queue = realloc(job_queue, sizeof(*job_queue) * new_cap);
+            job_queue_cap = new_cap;
+        }
+    }
+    return ans;
+}
+
+static void timespec_add(struct timespec* ts, uint64_t ns)
+{
+    ts->tv_sec += ns / 1000000000;
+    ns %= 1000000000;
+    ts->tv_nsec += ns;
+    if(ts->tv_nsec >= 1000000000)
+    {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000;
+    }
+}
+
+static void run_pending_jobs(void)
+{
+    struct timespec now = {};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    while(job_queue_size && timespec_cmp(&job_queue[0]->when, &now) <= 0)
+    {
+        struct scheduled_job* j = pop_job();
+        if(j->callback(j->opaque))
+        {
+            timespec_add(&j->when, j->interval);
+            push_job(j);
+        }
+        else
+            free(j);
+    }
+}
+
+static struct timeval* get_time_until_job(struct timeval* out)
+{
+    if(!job_queue_size)
+        return 0;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    struct timespec* next_job = &job_queue[0]->when;
+    if(timespec_cmp(next_job, &now) <= 0)
+        now.tv_sec = now.tv_nsec = 0;
+    else if(next_job->tv_nsec >= now.tv_nsec)
+    {
+        now.tv_sec = next_job->tv_sec - now.tv_sec;
+        now.tv_nsec = next_job->tv_nsec - now.tv_nsec;
+    }
+    else
+    {
+        now.tv_sec = next_job->tv_sec - now.tv_sec - 1;
+        now.tv_nsec = 1000000000 + next_job->tv_nsec - now.tv_nsec;
+    }
+    out->tv_sec = now.tv_sec;
+    out->tv_usec = (now.tv_nsec + 999) / 1000;
+    if(out->tv_usec == 1000000000)
+    {
+        out->tv_sec++;
+        out->tv_usec = 0;
+    }
+    return out;
+}
+
+void schedule_job(uint64_t interval, int(*callback)(void*), void* opaque)
+{
+    struct scheduled_job* j = malloc(sizeof(*j));
+    memset(j, 0, sizeof(*j));
+    j->interval = interval;
+    j->callback = callback;
+    j->opaque = opaque;
+    clock_gettime(CLOCK_MONOTONIC, &j->when);
+    timespec_add(&j->when, interval);
+    push_job(j);
+}
+
 static void broadcast_notification(const char* s)
 {
     size_t l = strlen(s);
@@ -1149,6 +1312,23 @@ static void broadcast_notification(const char* s)
         }
 }
 
+static int cring_voice_job(void* opaque)
+{
+    int state, direction;
+    const char* number;
+    API_DEBUG("modem_call_get_info(...)");
+    if(!modem_call_get_info(&number, &state, &direction))
+    {
+        API_DEBUG(" = 0\n");
+        return 0;
+    }
+    API_DEBUG(" = (\"%s\", %d, %d)\n", number ? number : "(null)", state, direction);
+    if(state != MODEM_CALL_STATE_INCOMING)
+        return 0;
+    broadcast_notification("\r\n+CRING: VOICE\r\n");
+    return 1;
+}
+
 void modem_call_incoming(void)
 {
     API_DEBUG("callback: modem_call_incoming()\n");
@@ -1157,6 +1337,7 @@ void modem_call_incoming(void)
     if(msg)
         broadcast_notification(msg);
     broadcast_notification("\r\n+CRING: VOICE\r\n");
+    //schedule_job(100000000, cring_voice_job, NULL);
     free(msg);
 }
 
@@ -1281,6 +1462,8 @@ static void conn_close(struct client_conn* conn)
 
 int main(int argc, const char** argv)
 {
+    job_queue_cap = MIN_JOB_QUEUE_CAP;
+    job_queue = calloc(MIN_JOB_QUEUE_CAP, sizeof(*job_queue));
     signal(SIGPIPE, SIG_IGN);
     if(argc == 1)
     {
@@ -1317,7 +1500,8 @@ int main(int argc, const char** argv)
         if(wrsocks.maxfd > nfds)
             nfds = rdreq.maxfd;
         nfds++;
-        if(select(nfds, &rdreq.set, &wrreq.set, NULL, NULL) <= 0)
+        struct timeval time_until_job;
+        if(select(nfds, &rdreq.set, &wrreq.set, NULL, get_time_until_job(&time_until_job)) < 0)
         {
             fprintf(stderr, "select failed\n");
             return 1;
@@ -1373,6 +1557,7 @@ int main(int argc, const char** argv)
             fprintf(stderr, "error in modem_poll_poll\n");
             return 1;
         }
+        run_pending_jobs();
     }
     return 0;
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2022-2024 Sergey Lisov
+Copyright 2022-2025 Sonya Sireneva
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
 
@@ -1281,32 +1281,28 @@ int modem_call_hangup(void)
     return 0;
 }
 
-//TODO: refactor this into a proper event loop
-static void* dtmf_thread(void* arg)
+static void dtmf_key(char key, int status)
 {
-    for(int state = 1; state >= 0; state--)
-    {
-        struct thread_req* req = malloc(sizeof(*req));
-        struct ipc_call_cont_dtmf_data* p = malloc(sizeof(*p));
-        p->status = state ? IPC_CALL_DTMF_STATUS_START : IPC_CALL_DTMF_STATUS_STOP;
-        p->tone = (char)(uintptr_t)arg;
-        req->type = THREAD_REQ_TYPE_DTMF_TONE;
-        req->ptr = p;
-        req->size = sizeof(*p);
-        write(thread_comm[0], &req, sizeof(req));
-        if(state)
-            usleep(200000);
-    }
-    return NULL;
+    struct thread_req* req = malloc(sizeof(*req));
+    struct ipc_call_cont_dtmf_data* p = malloc(sizeof(*p));
+    p->status = status;
+    p->tone = key;
+    req->type = THREAD_REQ_TYPE_DTMF_TONE;
+    req->ptr = p;
+    req->size = sizeof(*p);
+    write(thread_comm[0], &req, sizeof(req));
+}
+
+static int dtmf_job(void* opaque)
+{
+    dtmf_key((char)(uintptr_t)opaque, IPC_CALL_DTMF_STATUS_STOP);
+    return 0; //do not reschedule
 }
 
 int modem_call_send_dtmf(char key)
 {
-    pthread_t pth;
-    if(pthread_create(&pth, NULL, dtmf_thread, (void*)(uintptr_t)key))
-        return -1;
-    if(pthread_detach(pth))
-        return -1;
+    dtmf_key(key, IPC_CALL_DTMF_STATUS_START);
+    schedule_job(200000000, dtmf_job, (void*)(uintptr_t)key);
     return 0;
 }
 
