@@ -878,7 +878,6 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         {
             st->ppp_protocols = mask;
             //TODO: string unescape
-            char* apn = cmd+19;
             char* quote = strchr(apn, '"');
             if(quote)
                 *quote = 0;
