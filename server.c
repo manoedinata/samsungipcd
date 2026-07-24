@@ -465,11 +465,11 @@ static int format_creg_response(const char* resp_name, char** buf)
     API_DEBUG("&%d, &%d, &%d, &%d)\n", act, lac, cid, tac);
     //XXX: for LTE networks we should really return CEREG, not CGREG...
     if(lac < 0 || cid < 0)
-        return asprintf(buf, "\r\n+%s: 1,%d\r\n\r\nOK\r\n", resp_name, state);
+        return asprintf(buf, "\r\n+%s: 1,%d\r\n", resp_name, state);
     else if(act < 0)
-        return asprintf(buf, "\r\n+%s: 1,%d,\"%04X\",\"%08X\"\r\n\r\nOK\r\n", resp_name, state, lac, cid);
+        return asprintf(buf, "\r\n+%s: 1,%d,\"%04X\",\"%08X\"\r\n", resp_name, state, lac, cid);
     else
-        return asprintf(buf, "\r\n+%s: 1,%d,\"%04X\",\"%08X\",%d\r\n\r\nOK\r\n", resp_name, state, lac, cid, act);
+        return asprintf(buf, "\r\n+%s: 1,%d,\"%04X\",\"%08X\",%d\r\n", resp_name, state, lac, cid, act);
 }
 
 static const char* get_cgdcont_pdp_type(void)
@@ -550,6 +550,7 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         int len = format_creg_response(cmd+3, &buf);
         out_buf_write(out_buf, buf, len);
         free(buf);
+        WRITE_OK(out_buf);
     }
     else if(!strcmp(cmd, "AT+CSMS?"))
         WRITE_OK_STRING(out_buf, "\r\n+CSMS: 0,1,1,0\r\n");
