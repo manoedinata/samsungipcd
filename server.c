@@ -17,12 +17,15 @@ You should have received a copy of the GNU General Public License along with thi
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <time.h>
+#include <linux/fuse.h>
 
 int n_total = 0;
 int n_ppp = 0;
@@ -1419,9 +1422,92 @@ void modem_ussd_reply(int status, const char* message)
     free(buf);
 }
 
+static int cuse_open(const char* device_path)
+{
+    const char* device_name = device_path + 5; //strip leading /dev/
+    int cuse_fd = open("/dev/cuse", O_RDWR);
+    if(cuse_fd < 0)
+        return -1;
+    union
+    {
+        struct
+        {
+            struct fuse_in_header hdr;
+            struct cuse_init_in cuse;
+        } hdr;
+        char buf[8192];
+    } request;
+    ssize_t sz = read(cuse_fd, &request, sizeof(request));
+    if(sz < sizeof(request.hdr) || request.hdr.hdr.opcode != CUSE_INIT)
+    {
+        close(cuse_fd);
+        errno = EINVAL;
+        return -1;
+    }
+    struct
+    {
+        struct fuse_out_header hdr;
+        struct cuse_init_out cuse;
+        char devinfo[];
+    }* response = malloc(sizeof(*response) + strlen(device_name) + 9);
+    response->hdr.len = sizeof(*response) + strlen(device_name) + 9;
+    response->hdr.unique = request.hdr.hdr.unique;
+    response->cuse.major = request.hdr.cuse.major;
+    response->cuse.minor = request.hdr.cuse.minor;
+    memcpy(response->devinfo, "DEVNAME=", 8);
+    strcpy(response->devinfo+8, device_name);
+    if(write(cuse_fd, response, response->hdr.len) != response->hdr.len)
+    {
+        free(response);
+        close(cuse_fd);
+        return -1;
+    }
+    free(response);
+    int ptmx_fd = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+    if(ptmx_fd < 0)
+    {
+        close(cuse_fd);
+        return -1;
+    }
+    unsigned int ptn;
+    if(ioctl(ptmx_fd, TIOCGPTN, &ptn))
+    {
+        close(ptmx_fd);
+        close(cuse_fd);
+        return -1;
+    }
+    char pty_path[64];
+    sprintf(pty_path, "/dev/pts/%u", ptn);
+    if(mount(pty_path, device_path, 0, MS_BIND, 0))
+    {
+        close(ptmx_fd);
+        close(cuse_fd);
+        return -1;
+    }
+    int locked = 0;
+    if(ioctl(ptmx_fd, TIOCSPTLCK, &locked))
+    {
+        close(ptmx_fd);
+        close(cuse_fd);
+        return -1;
+    }
+    int pty_fd = open(pty_path, O_RDWR);
+    if(pty_fd < 0)
+    {
+        close(ptmx_fd);
+        close(cuse_fd);
+        return -1;
+    }
+    return ptmx_fd;
+}
+
 static int open_pty(const char* path, struct modem_fd_set* rdsocks)
 {
-    int fd = open(path, O_RDWR | O_NOCTTY);
+    int fd;
+    if(!strncmp(path, "cuse:/dev/", 9))
+        fd = cuse_open(path + 5);
+    else
+        fd = open(path, O_RDWR | O_NOCTTY);
     if(fd < 0)
         return -1;
     if(!strncmp(path, "/dev/pty", 8))
