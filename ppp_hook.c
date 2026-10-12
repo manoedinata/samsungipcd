@@ -103,17 +103,17 @@ static int tty_connect(void)
         unlink("/dev/ppp");
         close(dev_ppp_fd);
     }
-    int fd = open(ppp_devnam(), O_RDWR);
+    int fd = open(ppp_devnam, O_RDWR);
     if(fd < 0)
     {
-        error("Failed to open %s: %s", ppp_devnam(), strerror(errno));
+        error("Failed to open %s: %s", ppp_devnam, strerror(errno));
         return -1;
     }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     return fd;
 }
 
-static void tty_disestablish_ppp(int fd)
+void tty_disestablish_ppp(int fd)
 {
     if(!tcsetattr_done)
         return;
@@ -141,7 +141,7 @@ static void tty_send(unsigned char* p, int len)
 
 extern int ppp_dev_fd; //exported by accident??
 
-static int tty_establish_ppp(int fd)
+int tty_establish_ppp(int fd)
 {
     struct termios tios;
     if(tcgetattr(fd, &tios))
