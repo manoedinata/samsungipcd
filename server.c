@@ -25,6 +25,7 @@ You should have received a copy of the GNU General Public License along with thi
 #include <fcntl.h>
 #include <signal.h>
 #include <time.h>
+#include <termios.h>
 #include <linux/fuse.h>
 
 int n_total = 0;
@@ -1498,6 +1499,20 @@ static int cuse_open(const char* device_path)
         close(ptmx_fd);
         close(cuse_fd);
         return -1;
+    }
+    //A freshly allocated pty defaults to cooked mode with local echo
+    //on. Without this, every byte we write to ptmx_fd (AT responses,
+    //unsolicited notifications) gets echoed straight back into our
+    //own read queue, gets misparsed as garbage AT commands, and the
+    //ERROR replies to THOSE get echoed back too - a feedback loop
+    //that floods ERROR/notification spam independent of anything the
+    //real client ever sends. We're emulating a raw serial link here,
+    //not a human-typed terminal.
+    struct termios tios;
+    if(!tcgetattr(pty_fd, &tios))
+    {
+        cfmakeraw(&tios);
+        tcsetattr(pty_fd, TCSANOW, &tios);
     }
     return ptmx_fd;
 }
