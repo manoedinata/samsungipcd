@@ -103,17 +103,33 @@ static int tty_connect(void)
         unlink("/dev/ppp");
         close(dev_ppp_fd);
     }
-    int fd = open(ppp_devnam, O_RDWR);
+    //Not ppp_devnam: that's only ever written by tty.c's own
+    //connect_tty(), which this replaces - it stays empty here. devnam
+    //(pppd.h) is the one setdevname() actually populates while
+    //parsing the device name option, before this channel is even
+    //selected.
+    int fd = open(devnam, O_RDWR);
     if(fd < 0)
     {
-        error("Failed to open %s: %s", ppp_devnam, strerror(errno));
+        error("Failed to open %s: %s", devnam, strerror(errno));
         return -1;
     }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     return fd;
 }
 
-void tty_disestablish_ppp(int fd)
+//Not named tty_disestablish_ppp: pppd's own sys-linux.c already
+//exports a *real*, different function with that exact name (used by
+//its built-in tty.c channel). dlopen(RTLD_GLOBAL) lets the main
+//executable's own symbol shadow a same-named one in a later-loaded
+//shared object, so `.disestablish_ppp = tty_disestablish_ppp` below
+//was silently binding to pppd's own serial-line implementation
+//instead of this one - confirmed via `nm -D /usr/sbin/pppd` showing
+//it as a real global, and by the resulting "Couldn't set tty to PPP
+//discipline: Invalid argument" (pppd's own tty_establish_ppp trying a
+//TIOCSETD ioctl on what's actually a plain pty, which can't take the
+//PPP line discipline the way a real serial port can).
+static void samsungipcd_disestablish_ppp(int fd)
 {
     if(!tcsetattr_done)
         return;
@@ -141,7 +157,9 @@ static void tty_send(unsigned char* p, int len)
 
 extern int ppp_dev_fd; //exported by accident??
 
-int tty_establish_ppp(int fd)
+//Same reasoning as samsungipcd_disestablish_ppp above: pppd's own
+//sys-linux.c already exports a real, different "tty_establish_ppp".
+static int samsungipcd_establish_ppp(int fd)
 {
     struct termios tios;
     if(tcgetattr(fd, &tios))
@@ -160,7 +178,7 @@ int tty_establish_ppp(int fd)
     if(socketpair(AF_UNIX, SOCK_DGRAM, 0, pipe))
     {
         error("socketpair failed: %s", strerror(errno));
-        tty_disestablish_ppp(fd);
+        samsungipcd_disestablish_ppp(fd);
         return -1;
     }
     pthread_t pth;
@@ -169,7 +187,7 @@ int tty_establish_ppp(int fd)
         error("Failed to start PPP thread: %s", strerror(errno));
         close(pipe[0]);
         close(pipe[1]);
-        tty_disestablish_ppp(fd);
+        samsungipcd_disestablish_ppp(fd);
         return -1;
     }
     ppp_dev_fd = pipe[0];
@@ -179,10 +197,23 @@ int tty_establish_ppp(int fd)
     return pipe[0];
 }
 
+//pppd's find_option() (options.c) falls through to `the_channel->options`
+//for any option name it doesn't recognize in general_options/auth_options,
+//and dereferences it unconditionally (`opt->name` with no NULL check) -
+//leaving this NULL segfaults pppd the moment it parses *any* option that
+//isn't in those two tables (which is most of them: all of ipcp.c/lcp.c's
+//options route through this same fallthrough before ever reaching the
+//per-protocol tables). An empty, merely-terminated table is enough since
+//this plugin doesn't need any options of its own.
+static option_t no_channel_options[] = {
+    { NULL }
+};
+
 static struct channel tty_channel = {
+    .options = no_channel_options,
     .connect = tty_connect,
-    .establish_ppp = tty_establish_ppp,
-    .disestablish_ppp = tty_disestablish_ppp,
+    .establish_ppp = samsungipcd_establish_ppp,
+    .disestablish_ppp = samsungipcd_disestablish_ppp,
 };
 
 void plugin_init(void)
