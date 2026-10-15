@@ -48,7 +48,18 @@ The daemon is given one path per AT port. A plain path (a pty master, or a drive
 master node) is opened as it is. A path starting with `cuse:` makes the daemon create the
 device itself through CUSE.
 
-### Recommended: virtual tty ports from the kernel (Linux with `CONFIG_TTY_GSM_VIRTUAL`)
+### Recommended: ModemManager plugin, data over `rmnet0` (no PPP)
+
+This is the way regular modems with a network interface work, and the one used on the J4.
+A [ModemManager plugin](https://github.com/manoedinata/debian_j4lte/tree/master/mm-plugin-samsungipcd)
+makes ModemManager activate the data session with `AT+CGACT`, read the address and DNS with
+`AT+CGCONTRDP` and report them as a static IP configuration on the modem's network interface
+(`rmnet0`). NetworkManager then puts that on `rmnet0`; there is no PPP, no `ppp0`, and no packet
+passes through this daemon. ModemManager shows one modem with the ports `rmnet0 (net)`,
+`ttyGSM0 (at)` and `ttyGSM1 (at)`, and `mmcli -b` reports method `static`. It needs the kernel
+`ttygsm` driver described next for the AT ports, and a udev rule that ties the ports to the plugin.
+
+### AT ports as real tty devices: virtual tty ports from the kernel (Linux with `CONFIG_TTY_GSM_VIRTUAL`)
 
 ModemManager only watches the `tty`, `net` and `usb` udev subsystems, so the ports must be
 real tty devices. Neither a pty nor a CUSE device is. The
@@ -78,7 +89,7 @@ Start the daemon before ModemManager (ModemManager probes the ports once when it
 Then connect with `mmcli` or, as a normal mobile broadband connection, with NetworkManager
 (`nmcli connection add type gsm ifname '*' con-name "Mobile data" gsm.apn <apn>`).
 
-Data goes through PPP on the data port. ModemManager only dials (`ATD`) and NetworkManager
+With the plugin above there is no PPP. Without it, data goes through PPP on the data port. ModemManager only dials (`ATD`) and NetworkManager
 runs pppd on the port, which needs a kernel with `CONFIG_PPP_ASYNC` (the `N_PPP` line
 discipline) so that pppd can create `ppp0`. The daemon answers LCP, PAP and IPCP itself and
 hands the packets to the modem's `rmnet0` interface. Note that IPv4 packets from the modem
