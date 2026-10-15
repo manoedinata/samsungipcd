@@ -170,6 +170,10 @@ static char gprs_dns1[4];
 static char gprs_dns2[4];
 static char ipv6_link_id[8];
 static int need_gprs;
+static int sim_status = -1; //raw IPC_SEC_PIN_STATUS_*, -1 until the modem has said something
+static int sim_facility_lock; //IPC_SEC_FACILITY_LOCK_TYPE_* that goes with sim_status
+static char* sim_imsi; //NULL until it has been read from the SIM
+static int sim_imsi_requested;
 static int net_status_cs, net_status_ps; //raw NET_REGIST status per service domain (0 = none seen yet)
 static int device_ready; //set once the modem reported SMS_DEVICE_READY and got its service domain
 static int gprs_enable_pending; //data was requested before that
@@ -613,6 +617,53 @@ static void* sipc_thread(void* arg)
                 }
             }
         }
+        else if(msg.command == IPC_SEC_PIN_STATUS)
+        {
+            struct ipc_sec_pin_status_response_data* st = msg.data;
+            if(msg.size >= 1)
+            {
+                int status = st->status;
+                int lock = GET(st->facility_lock);
+                int ready, absent;
+                LOCKED()
+                {
+                    sim_status = status;
+                    sim_facility_lock = lock;
+                    ready = (status == IPC_SEC_PIN_STATUS_READY
+                          || status == IPC_SEC_PIN_STATUS_INIT_COMPLETE
+                          || status == IPC_SEC_PIN_STATUS_PB_INIT_COMPLETE);
+                    absent = (status == IPC_SEC_PIN_STATUS_CARD_NOT_PRESENT
+                           || status == IPC_SEC_PIN_STATUS_CARD_ERROR);
+                    if(absent)
+                    {
+                        //a different card may come back: forget the old identity
+                        free(sim_imsi);
+                        sim_imsi = NULL;
+                        sim_imsi_requested = 0;
+                    }
+                }
+                printf("sim status = 0x%02x, facility lock = %d\n", status, lock);
+                if(ready && !sim_imsi_requested)
+                {
+                    //the IMSI can only be read once the SIM is up
+                    sim_imsi_requested = 1;
+                    ipc_client_send(fmt, seq_cntr++, IPC_MISC_ME_IMSI, IPC_TYPE_GET, NULL, 0);
+                }
+            }
+        }
+        else if(msg.command == IPC_MISC_ME_IMSI)
+        {
+            char* imsi = ipc_misc_me_imsi_imsi_extract(msg.data, msg.size);
+            //the IMSI identifies the subscriber, never print it
+            printf("sim imsi %s\n", imsi ? "read" : "unavailable");
+            LOCKED()
+            {
+                free(sim_imsi);
+                sim_imsi = imsi;
+            }
+            if(!imsi)
+                sim_imsi_requested = 0; //ask again at the next SIM status or when the device is ready
+        }
         else if(msg.command == IPC_SMS_DEVICE_READY)
         {
             //the modem boots with circuit switched service only; packet data needs CS+PS
@@ -620,6 +671,11 @@ static void* sipc_thread(void* arg)
             ipc_net_service_domain_config_setup(&domain, IPC_NET_SERVICE_DOMAIN_CONFIG_CS_PS);
             ipc_client_send(fmt, seq_cntr++, IPC_NET_SERVICE_DOMAIN_CONFIG, IPC_TYPE_SET, &domain, sizeof(domain));
             device_ready = 1;
+            if(!sim_imsi && !sim_imsi_requested && modem_sim_get_status() == MODEM_SIM_READY)
+            {
+                sim_imsi_requested = 1;
+                ipc_client_send(fmt, seq_cntr++, IPC_MISC_ME_IMSI, IPC_TYPE_GET, NULL, 0);
+            }
             if(gprs_enable_pending)
             {
                 gprs_enable_pending = 0;
@@ -1250,6 +1306,63 @@ static int map_registration_status(int status, int packet)
     case 10: return packet ? 5 : 7;
     default: return 4; //5, and anything we have not seen yet
     }
+}
+
+//Follows the meaning libsamsung-ipc gives the values. Seen on the J4: ready, and card
+//not present for the empty slot; the lock states have not been tried.
+int modem_sim_get_status(void)
+{
+    int status, lock;
+    LOCKED()
+    {
+        status = sim_status;
+        lock = sim_facility_lock;
+    }
+    switch(status)
+    {
+    case IPC_SEC_PIN_STATUS_READY:
+    case IPC_SEC_PIN_STATUS_INIT_COMPLETE:
+    case IPC_SEC_PIN_STATUS_PB_INIT_COMPLETE:
+    case IPC_SEC_PIN_STATUS_LOCK_FD: //fixed dialling is not a lock that stops the card from being used
+        return MODEM_SIM_READY;
+    case IPC_SEC_PIN_STATUS_SIM_LOCK_REQUIRED:
+    case IPC_SEC_PIN_STATUS_LOCK_SC:
+        if(lock == IPC_SEC_FACILITY_LOCK_TYPE_SC_PUK_REQ)
+            return MODEM_SIM_PUK;
+        if(lock == IPC_SEC_FACILITY_LOCK_TYPE_SC_CARD_BLOCKED)
+            return MODEM_SIM_BLOCKED;
+        return MODEM_SIM_PIN;
+    case IPC_SEC_PIN_STATUS_LOCK_PN:
+        return MODEM_SIM_PH_NET_PIN;
+    case IPC_SEC_PIN_STATUS_LOCK_PU:
+        return MODEM_SIM_PH_NETSUB_PIN;
+    case IPC_SEC_PIN_STATUS_LOCK_PP:
+        return MODEM_SIM_PH_SP_PIN;
+    case IPC_SEC_PIN_STATUS_LOCK_PC:
+        return MODEM_SIM_PH_CORP_PIN;
+    case IPC_SEC_PIN_STATUS_CARD_NOT_PRESENT:
+        return MODEM_SIM_ABSENT;
+    case IPC_SEC_PIN_STATUS_CARD_ERROR:
+    case IPC_SEC_PIN_STATUS_INSIDE_PF_ERROR:
+        return MODEM_SIM_ERROR;
+    default:
+        return MODEM_SIM_UNKNOWN;
+    }
+}
+
+int modem_sim_get_imsi(char imsi[16])
+{
+    int ans = -1;
+    LOCKED()
+    {
+        if(sim_imsi)
+        {
+            memset(imsi, 0, 16);
+            strncpy(imsi, sim_imsi, 15);
+            ans = 0;
+        }
+    }
+    return ans;
 }
 
 int modem_registration_get_status(void)

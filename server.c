@@ -500,6 +500,33 @@ static const char* get_cgdcont_pdp_type(void)
     return names[mask];
 }
 
+//AT+CMEE: how errors are reported. 0 plain ERROR, 1 numeric "+CME ERROR: 10", 2 with text.
+//Shared by all connections: it describes the modem's behaviour, not one port's.
+static int cmee_mode;
+
+static void write_cme_error(struct io_buf* out_buf, int code)
+{
+    const char* text = "unknown";
+    switch(code)
+    {
+    case 10: text = "SIM not inserted"; break;
+    case 11: text = "SIM PIN required"; break;
+    case 12: text = "SIM PUK required"; break;
+    case 13: text = "SIM failure"; break;
+    case 14: text = "SIM busy"; break;
+    }
+    char* msg = NULL;
+    int len;
+    if(cmee_mode == 1)
+        len = asprintf(&msg, "\r\n+CME ERROR: %d\r\n", code);
+    else if(cmee_mode == 2)
+        len = asprintf(&msg, "\r\n+CME ERROR: %s\r\n", text);
+    else
+        len = asprintf(&msg, "\r\nERROR\r\n");
+    out_buf_write(out_buf, msg, len);
+    free(msg);
+}
+
 void schedule_job(uint64_t interval, int(*callback)(void*), void* opaque);
 static int cgact_timeout_job(void* opaque);
 static int cgact_request_counter;
@@ -558,12 +585,83 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         out_buf_write(out_buf, buf, len);
         free(buf);
     }
+    else if(!strcmp(cmd, "AT+CMEE=?"))
+        WRITE_OK_STRING(out_buf, "\r\n+CMEE: (0-2)\r\n");
+    else if(!strcmp(cmd, "AT+CMEE?"))
+    {
+        char* msg = NULL;
+        int len = asprintf(&msg, "\r\n+CMEE: %d\r\n", cmee_mode);
+        out_buf_write(out_buf, msg, len);
+        free(msg);
+        WRITE_OK(out_buf);
+    }
+    else if(!strncmp(cmd, "AT+CMEE=", 8) && cmd[8] >= '0' && cmd[8] <= '2' && !cmd[9])
+    {
+        cmee_mode = cmd[8] - '0';
+        WRITE_OK(out_buf);
+    }
     else if(!strcmp(cmd, "AT+SIMSTATE?"))
-        WRITE_OK_STRING(out_buf, "\r\n+SIMSTATE: 1\r\n"); //TODO: stub
+    {
+        //1 when the card is there and usable
+        API_DEBUG("modem_sim_get_status()");
+        int sim = modem_sim_get_status();
+        API_DEBUG(" = %d\n", sim);
+        //WRITE_OK_STRING needs string literals (it takes their size), so no ?: inside
+        if(sim == MODEM_SIM_READY)
+            WRITE_OK_STRING(out_buf, "\r\n+SIMSTATE: 1\r\n");
+        else
+            WRITE_OK_STRING(out_buf, "\r\n+SIMSTATE: 0\r\n");
+    }
     else if(!strcmp(cmd, "AT+CPIN?"))
-        WRITE_OK_STRING(out_buf, "\r\n+CPIN: READY\r\n"); //TODO: stub
+    {
+        API_DEBUG("modem_sim_get_status()");
+        int sim = modem_sim_get_status();
+        API_DEBUG(" = %d\n", sim);
+        const char* answer = NULL;
+        switch(sim)
+        {
+        case MODEM_SIM_READY: answer = "READY"; break;
+        case MODEM_SIM_PIN: answer = "SIM PIN"; break;
+        case MODEM_SIM_PUK: answer = "SIM PUK"; break;
+        case MODEM_SIM_PH_NET_PIN: answer = "PH-NET PIN"; break;
+        case MODEM_SIM_PH_NETSUB_PIN: answer = "PH-NETSUB PIN"; break;
+        case MODEM_SIM_PH_SP_PIN: answer = "PH-SP PIN"; break;
+        case MODEM_SIM_PH_CORP_PIN: answer = "PH-CORP PIN"; break;
+        }
+        if(answer)
+        {
+            char* msg = NULL;
+            int len = asprintf(&msg, "\r\n+CPIN: %s\r\n", answer);
+            out_buf_write(out_buf, msg, len);
+            free(msg);
+            WRITE_OK(out_buf);
+        }
+        else if(sim == MODEM_SIM_ABSENT)
+            write_cme_error(out_buf, 10);
+        else if(sim == MODEM_SIM_ERROR || sim == MODEM_SIM_BLOCKED)
+            write_cme_error(out_buf, 13);
+        else
+            write_cme_error(out_buf, 14); //the modem has not told yet
+    }
     else if(!strcmp(cmd, "AT+CIMI"))
-        WRITE_OK_STRING(out_buf, "\r\n246813579\r\n"); //TODO: stub
+    {
+        char imsi[16];
+        API_DEBUG("modem_sim_get_imsi()");
+        if(!modem_sim_get_imsi(imsi))
+        {
+            API_DEBUG(" = 0 (OK)\n");
+            char* msg = NULL;
+            int len = asprintf(&msg, "\r\n%s\r\n", imsi);
+            out_buf_write(out_buf, msg, len);
+            free(msg);
+            WRITE_OK(out_buf);
+        }
+        else
+        {
+            API_DEBUG(" = ERROR\n");
+            write_cme_error(out_buf, modem_sim_get_status() == MODEM_SIM_ABSENT ? 10 : 14);
+        }
+    }
     else if(!strcmp(cmd, "AT+CGACT=?"))
         WRITE_OK_STRING(out_buf, "\r\n+CGACT: (0,1)\r\n");
     else if(!strcmp(cmd, "AT+CGACT?"))

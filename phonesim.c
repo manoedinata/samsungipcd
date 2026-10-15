@@ -192,7 +192,27 @@ int modem_conf_is_online(void)
     return is_online;
 }
 
+int modem_sim_get_status(void)
+{
+    //PHONESIM_SIM=<n> picks another state (the MODEM_SIM_* values) to try the error paths
+    const char* forced = getenv("PHONESIM_SIM");
+    return forced ? atoi(forced) : MODEM_SIM_READY;
+}
+
+int modem_sim_get_imsi(char imsi[16])
+{
+    if(modem_sim_get_status() != MODEM_SIM_READY)
+        return -1; //nothing to read without a usable SIM
+    strcpy(imsi, "001010123456789"); //test network 001/01, not a real subscriber
+    return 0;
+}
+
 int modem_registration_get_status(void)
+{
+    return is_online ? MODEM_REGISTRATION_HOME_NETWORK : MODEM_REGISTRATION_NOT_REGISTERED;
+}
+
+int modem_registration_get_ps_status(void)
 {
     return is_online ? MODEM_REGISTRATION_HOME_NETWORK : MODEM_REGISTRATION_NOT_REGISTERED;
 }

@@ -21,7 +21,8 @@ This copy is a fork of [sleirsgoevy/samsungipcd](https://gitlab.com/sleirsgoevy/
 * USSD codes (pseudo-numbers with textual answers)
 * SIM unlocking
 * IPv6 on Shannon modems (the modem side has not been tried)
-* A real SIM state: `AT+CPIN?` and `AT+CIMI` are stubs that always say "ready" and return a fake IMSI
+* Entering a PIN or PUK (`AT+CPIN=`); a locked SIM is reported but cannot be unlocked here
+* The ICCID and the phone number (`AT+CCID`, `AT+CNUM`)
 
 ## Building
 
@@ -34,6 +35,10 @@ Or to build the simulator (for testing without real hardware):
 ```
 gcc server.c phonesim.c -o samsungipcd
 ```
+
+`make samsungipcd-sim` builds it too. `python3 tests/sim_at.py ./samsungipcd-sim` checks the
+SIM related AT commands against it for every SIM state and error format (the simulator takes the
+state from `PHONESIM_SIM`).
 
 `make` builds the daemon with the right flags (`PREFIX` defaults to `/usr`).
 
@@ -159,6 +164,13 @@ with the old message sequence. Verified with a SIM that has an active data plan 
 The layouts were read from the stock `libsec-ril.so` and checked against the modem. The names of
 the service domain values and the meaning of some attach profile fields are inferred, see the
 comments in libsamsung-ipc's `include/net.h` and `include/gprs.h`.
+
+The SIM is reported from what the modem says: `AT+CPIN?` answers `READY`, `SIM PIN`, `SIM PUK` or one of the
+`PH-... PIN` personalisation locks, and `AT+CIMI` returns the IMSI read from the SIM once it is ready. While the
+card is absent, faulty or the modem has not said anything yet, they fail with `+CME ERROR` 10, 13 or 14
+(`SIM not inserted`, `SIM failure`, `SIM busy`). `AT+CMEE=0|1|2` selects how errors look (plain `ERROR`,
+numeric or with text), as ModemManager expects. Seen on the J4: ready for the SIM in slot 2; the lock states
+follow libsamsung-ipc's definitions and have not been tried.
 
 Registration is reported separately for the circuit and the packet domain (`+CREG`, `+CGREG`) and,
 on LTE, as `+CEREG`, so ModemManager shows `home` instead of `home-sms-only`. That the modem's

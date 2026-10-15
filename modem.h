@@ -102,6 +102,24 @@ int modem_conf_set_online(int is_online);
 int modem_registration_get_mode(void);
 int modem_registration_get_operator_code(void);
 const char* modem_registration_get_operator_name(int short_form);
+//SIM state, as reported by the modem (the IMSI is only available once the SIM is ready)
+enum
+{
+    MODEM_SIM_UNKNOWN, //the modem has not said anything yet
+    MODEM_SIM_ABSENT,
+    MODEM_SIM_ERROR,
+    MODEM_SIM_BLOCKED, //permanently, e.g. the PUK has been used up
+    MODEM_SIM_READY,
+    MODEM_SIM_PIN, //waiting for the PIN
+    MODEM_SIM_PUK, //waiting for the PUK
+    MODEM_SIM_PH_NET_PIN, //network, network subset, service provider and corporate personalisation
+    MODEM_SIM_PH_NETSUB_PIN,
+    MODEM_SIM_PH_SP_PIN,
+    MODEM_SIM_PH_CORP_PIN,
+};
+int modem_sim_get_status(void);
+int modem_sim_get_imsi(char imsi[16]); //0 on success, NUL terminated, up to 15 digits
+
 int modem_registration_get_status(void); //circuit switched, 3GPP <stat> as in +CREG
 int modem_registration_get_ps_status(void); //packet switched (+CGREG, and +CEREG on LTE), same values
 int modem_registration_get_rssi(void); //0 for unknown
