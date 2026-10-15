@@ -170,6 +170,8 @@ static char gprs_dns1[4];
 static char gprs_dns2[4];
 static char ipv6_link_id[8];
 static int need_gprs;
+static int device_ready; //set once the modem reported SMS_DEVICE_READY and got its service domain
+static int gprs_enable_pending; //data was requested before that
 static int have_gprs;
 static int have_ipv6_link;
 static int rmnet_fd;
@@ -314,8 +316,18 @@ static void* sipc_thread(void* arg)
             else if(ptr->type == THREAD_REQ_TYPE_SET_GPRS)
             {
                 int enabled = ptr->size;
-                if(enabled && !need_gprs)
+                if(enabled && !device_ready)
                 {
+                    //too early: the service domain has not been set up yet, redo this once the modem is ready
+                    gprs_enable_pending = 1;
+                    enabled = 0;
+                }
+                else if(!enabled)
+                    gprs_enable_pending = 0;
+                if(enabled)
+                {
+                    //also when already enabled: a redial after a failed activation (e.g. the modem was still
+                    //re-registering after the service domain change) has to restart the whole sequence
                     need_gprs = 1;
                     struct ipc_gprs_define_pdp_context_data data;
                     char apn[sizeof(data.apn)] = {0};
@@ -595,6 +607,16 @@ static void* sipc_thread(void* arg)
             struct ipc_net_service_domain_config_data domain;
             ipc_net_service_domain_config_setup(&domain, IPC_NET_SERVICE_DOMAIN_CONFIG_CS_PS);
             ipc_client_send(fmt, seq_cntr++, IPC_NET_SERVICE_DOMAIN_CONFIG, IPC_TYPE_SET, &domain, sizeof(domain));
+            device_ready = 1;
+            if(gprs_enable_pending)
+            {
+                gprs_enable_pending = 0;
+                struct thread_req* req = malloc(sizeof(*req));
+                req->type = THREAD_REQ_TYPE_SET_GPRS;
+                req->ptr = NULL;
+                req->size = 1;
+                write(thread_comm[1], &req, sizeof(req));
+            }
             ipc_client_send(fmt, seq_cntr++, IPC_SMS_SVC_CENTER_ADDR, IPC_TYPE_GET, NULL, 0);
         }
         else if(msg.command == IPC_SMS_SVC_CENTER_ADDR)
