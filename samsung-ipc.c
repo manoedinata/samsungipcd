@@ -325,6 +325,11 @@ static void* sipc_thread(void* arg)
                         //assume the best once again, in case the previous probe request failed due to some other error
                     }
                     modem_supports_ipv6 = 1;
+                    //Shannon (LTE) modems only attach to the packet domain with an LTE attach profile
+                    //in place, and without it they stay in "not ready" for the PDP activation below
+                    struct ipc_gprs_lte_attach_apn_info_data attach;
+                    if(!ipc_gprs_lte_attach_apn_info_setup(&attach, 1, apn, NULL, NULL))
+                        ipc_client_send(fmt, seq_cntr++, IPC_GPRS_LTE_ATTACH_APN_INFO, IPC_TYPE_SET, &attach, sizeof(attach));
                     ipc_gprs_define_pdp_context_setup(&data, 1, 1, apn);
                     //if the modem doesn't support ipv6, it will probably respond with an error
                     //we'll then retry the request without this assignment to get ipv4 connectivity
@@ -585,7 +590,13 @@ static void* sipc_thread(void* arg)
             }
         }
         else if(msg.command == IPC_SMS_DEVICE_READY)
+        {
+            //the modem boots with circuit switched service only; packet data needs CS+PS
+            struct ipc_net_service_domain_config_data domain;
+            ipc_net_service_domain_config_setup(&domain, IPC_NET_SERVICE_DOMAIN_CONFIG_CS_PS);
+            ipc_client_send(fmt, seq_cntr++, IPC_NET_SERVICE_DOMAIN_CONFIG, IPC_TYPE_SET, &domain, sizeof(domain));
             ipc_client_send(fmt, seq_cntr++, IPC_SMS_SVC_CENTER_ADDR, IPC_TYPE_GET, NULL, 0);
+        }
         else if(msg.command == IPC_SMS_SVC_CENTER_ADDR)
         {
             uint8_t* smsc = (uint8_t*)msg.data;
@@ -632,7 +643,7 @@ static void* sipc_thread(void* arg)
             for(int i = 0; i < msg.size; i++)
                 printf(" %02hhx", ptr[i]);
             printf("\n");
-            if((GET(data->field_flag) & 7) != 7)
+            if(!(GET(data->field_flag) & 1)) //IP address is all we really need, DNS may be missing
             {
                 printf("gprs_ip_configuration with incomplete data, no idea what to do\n");
                 //disconnect the modem
@@ -657,8 +668,12 @@ static void* sipc_thread(void* arg)
                 {
                     char stub_ip[8] = {0};
                     memcpy(gprs_ip, PTRCHECK(data->ip, 4, stub_ip), 4);
-                    memcpy(gprs_dns1, PTRCHECK(data->dns1, 4, stub_ip), 4);
-                    memcpy(gprs_dns2, PTRCHECK(data->dns2, 4, stub_ip), 4);
+                    memset(gprs_dns1, 0, 4);
+                    memset(gprs_dns2, 0, 4);
+                    if(GET(data->field_flag) & 2)
+                        memcpy(gprs_dns1, PTRCHECK(data->dns1, 4, stub_ip), 4);
+                    if(GET(data->field_flag) & 4)
+                        memcpy(gprs_dns2, PTRCHECK(data->dns2, 4, stub_ip), 4);
                     char* ipv6_link_local = (char*)data + 35;
                     if(!memcmp(PTRCHECK(ipv6_link_local, 8, stub_ip), "\xfe\x80\x00\x00\x00\x00\x00", 8))
                     {
