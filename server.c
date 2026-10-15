@@ -461,14 +461,21 @@ static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size, int pr
 
 static int format_creg_response(const char* resp_name, char** buf)
 {
+    //CREG: circuit switched. CGREG: packet switched. CEREG: packet switched on LTE (EPS), not registered elsewhere.
+    int eps = !strcmp(resp_name, "CEREG");
     API_DEBUG("modem_registration_get_status()");
-    int state = modem_registration_get_status();
+    int state = !strcmp(resp_name, "CREG") ? modem_registration_get_status() : modem_registration_get_ps_status();
     API_DEBUG(" = %d\n", state);
     int act, lac, cid, tac;
     API_DEBUG("modem_registration_get_cell_info(");
     modem_registration_get_cell_info(&act, &lac, &cid, &tac);
     API_DEBUG("&%d, &%d, &%d, &%d)\n", act, lac, cid, tac);
-    //XXX: for LTE networks we should really return CEREG, not CGREG...
+    if(eps)
+    {
+        if(act != MODEM_ACCESS_TECHNOLOGY_EUTRAN)
+            return asprintf(buf, "\r\n+CEREG: 1,0\r\n");
+        lac = tac; //LTE tracking area code takes the place of the location area code
+    }
     if(lac < 0 || cid < 0)
         return asprintf(buf, "\r\n+%s: 1,%d\r\n", resp_name, state);
     else if(act < 0)
@@ -548,7 +555,7 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         WRITE_OK_STRING(out_buf, "\r\n+CPIN: READY\r\n"); //TODO: stub
     else if(!strcmp(cmd, "AT+CIMI"))
         WRITE_OK_STRING(out_buf, "\r\n246813579\r\n"); //TODO: stub
-    else if(!strcmp(cmd, "AT+CREG?") || !strcmp(cmd, "AT+CGREG?"))
+    else if(!strcmp(cmd, "AT+CREG?") || !strcmp(cmd, "AT+CGREG?") || !strcmp(cmd, "AT+CEREG?"))
     {
         *strchr(cmd, '?') = 0;
         char* buf = NULL;
@@ -1410,10 +1417,14 @@ void modem_inet_disconnected(void)
 
 void modem_registration_status_update(void)
 {
-    char* buf = NULL;
-    format_creg_response("CGREG", &buf);
-    broadcast_notification(buf);
-    free(buf);
+    static const char* const kinds[] = {"CREG", "CGREG", "CEREG"};
+    for(size_t i = 0; i < sizeof(kinds) / sizeof(*kinds); i++)
+    {
+        char* buf = NULL;
+        format_creg_response(kinds[i], &buf);
+        broadcast_notification(buf);
+        free(buf);
+    }
 }
 
 void modem_ussd_reply(int status, const char* message)

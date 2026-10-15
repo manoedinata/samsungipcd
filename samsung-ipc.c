@@ -170,6 +170,7 @@ static char gprs_dns1[4];
 static char gprs_dns2[4];
 static char ipv6_link_id[8];
 static int need_gprs;
+static int net_status_cs, net_status_ps; //raw NET_REGIST status per service domain (0 = none seen yet)
 static int device_ready; //set once the modem reported SMS_DEVICE_READY and got its service domain
 static int gprs_enable_pending; //data was requested before that
 static int have_gprs;
@@ -473,6 +474,13 @@ static void* sipc_thread(void* arg)
             {
                 struct ipc_net_regist_response_data* data = msg.data;
                 net_status = GET(data->status);
+                //The reply carries one record per service domain; keep them apart. Domain 1 is seen on LTE where
+                //circuit and packet service are attached together.
+                int domain = GET(data->domain);
+                if(domain != IPC_NET_SERVICE_DOMAIN_GPRS)
+                    net_status_cs = net_status;
+                if(domain != IPC_NET_SERVICE_DOMAIN_GSM)
+                    net_status_ps = net_status;
                 net_tech = GET(data->act);
                 net_lac = GET(data->lac);
                 net_cid = GET(data->cid);
@@ -496,7 +504,7 @@ static void* sipc_thread(void* arg)
                     net_cid = -1;
                     net_tac = -1;
                 }
-                printf("net_status = %d, act = %d, lac = %d, cid = %d, tac = %d\n", net_status, net_tech, net_lac, net_cid, net_tac);
+                printf("net_status = %d, act = %d, lac = %d, cid = %d, tac = %d, domain = %d, fail_cause = %d\n", net_status, net_tech, net_lac, net_cid, net_tac, GET(data->domain), GET(data->fail_cause));
             }
             struct thread_req* req = malloc(sizeof(*req));
             req->type = THREAD_REQ_TYPE_REGIST;
@@ -1210,10 +1218,40 @@ const char* modem_registration_get_operator_name(int short_form) //FIXME
     return NULL;
 }
 
+//Maps the modem's registration status to the 3GPP <stat> of +CREG/+CGREG/+CEREG.
+//1..6 and 8, 9 are the same as the stock RIL's own conversion (libsec-ril,
+//IpcProtocol41::IpcRxNetRegState): 1 none, 2 home, 3 searching, 4 denied, 5 unknown, 6 roaming,
+//8 none, 9 denied. 7 and 10 are only seen on LTE and the stock RIL treats them as one class.
+//INFERENCE, not decoded: the packet domain being in state 7 is the one in which data
+//sessions work, so it is reported as registered (home); 10 as roaming by symmetry. For the
+//circuit domain they stay "SMS only" (home / roaming), which is what a network without
+//circuit switched fallback voice amounts to.
+static int map_registration_status(int status, int packet)
+{
+    switch(status)
+    {
+    case 1: case 8: return 0;
+    case 2: return 1;
+    case 3: return 2;
+    case 4: case 9: return 3;
+    case 6: return 5;
+    case 7: return packet ? 1 : 6;
+    case 10: return packet ? 5 : 7;
+    default: return 4; //5, and anything we have not seen yet
+    }
+}
+
 int modem_registration_get_status(void)
 {
     int ans;
-    LOCKED() ans = net_status - 1;
+    LOCKED() ans = map_registration_status(net_status_cs, 0);
+    return ans;
+}
+
+int modem_registration_get_ps_status(void)
+{
+    int ans;
+    LOCKED() ans = map_registration_status(net_status_ps, 1);
     return ans;
 }
 

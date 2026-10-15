@@ -102,7 +102,8 @@ int modem_conf_set_online(int is_online);
 int modem_registration_get_mode(void);
 int modem_registration_get_operator_code(void);
 const char* modem_registration_get_operator_name(int short_form);
-int modem_registration_get_status(void);
+int modem_registration_get_status(void); //circuit switched, 3GPP <stat> as in +CREG
+int modem_registration_get_ps_status(void); //packet switched (+CGREG, and +CEREG on LTE), same values
 int modem_registration_get_rssi(void); //0 for unknown
 void modem_registration_get_cell_info(int* act, int* lac, int* cid, int* tac); //-1 for unknown
 double modem_registration_get_error_rate(void); //-1 for unknown
