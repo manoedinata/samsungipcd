@@ -95,6 +95,27 @@ Or let the daemon allocate the ports with CUSE (`CONFIG_CUSE`): `samsungipcd cus
 The ports are a pty bind-mounted over the CUSE node, which udev and ModemManager do not see, so
 this works for talking to the AT port directly and for a plain pppd, not for ModemManager.
 
+### Packet data without PPP (`AT+CGACT`)
+
+Ordinary modems with a separate network interface do not use PPP: the host activates the
+PDP context with AT commands, reads the address back and configures the modem's network
+interface itself. samsungipcd supports this too, for the modem's own interface (`rmnet0` on the J4):
+
+```
+AT+CGDCONT=1,"IP","<apn>"
+AT+CGACT=1,1         OK once the session is up (ERROR after 25 s); AT+CGACT=0,1 deactivates
+AT+CGPADDR           +CGPADDR: 1,"10.81.183.131"
+AT+CGCONTRDP         +CGCONTRDP: 1,5,"<apn>","10.81.183.131.255.255.255.255","","<dns1>","<dns2>"
+```
+
+Then give `rmnet0` that address as a `/32` and route over it; the kernel's modem driver carries
+the packets, nothing passes through this daemon and there is no `ppp0`. The modem gives no
+gateway and no netmask, it is a point-to-point link. A dropped session is announced with
+`+CGEV: NW PDN DEACT 1`. Only IPv4 and context 1.
+
+The first activation after the daemon starts usually fails with `ERROR`: sending the LTE attach
+profile makes the modem re-register for a few seconds and the request in flight is lost. Repeat it.
+
 ### Plain pppd
 
 Without ModemManager, dial with chat and run pppd on the port, for example

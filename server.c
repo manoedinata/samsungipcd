@@ -97,6 +97,7 @@ struct conn_status
     int sms_nr;
     int is_ppp;
     int want_retry;
+    int cgact_wait; //non-zero: AT+CGACT=1 is waiting for the modem, holds the request number
 };
 
 //internal enum to facilitate storing protocols in a bitmask
@@ -499,6 +500,14 @@ static const char* get_cgdcont_pdp_type(void)
     return names[mask];
 }
 
+void schedule_job(uint64_t interval, int(*callback)(void*), void* opaque);
+static int cgact_timeout_job(void* opaque);
+static int cgact_request_counter;
+#define CGACT_TIMEOUT_NS (25 * 1000000000ULL)
+
+//The ordinary-modem way of getting packet data: AT+CGACT activates the PDP context, the address
+//is read back with AT+CGPADDR / AT+CGCONTRDP and the host puts it on the modem's network
+//interface itself (rmnet0 here). No PPP, and no packets pass through this daemon.
 static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, char* cmd)
 {
     if(!strcmp(cmd, "AT"))
@@ -555,6 +564,98 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         WRITE_OK_STRING(out_buf, "\r\n+CPIN: READY\r\n"); //TODO: stub
     else if(!strcmp(cmd, "AT+CIMI"))
         WRITE_OK_STRING(out_buf, "\r\n246813579\r\n"); //TODO: stub
+    else if(!strcmp(cmd, "AT+CGACT=?"))
+        WRITE_OK_STRING(out_buf, "\r\n+CGACT: (0,1)\r\n");
+    else if(!strcmp(cmd, "AT+CGACT?"))
+    {
+        char ip[4], dns1[4], dns2[4];
+        char* msg = NULL;
+        int len = asprintf(&msg, "\r\n+CGACT: 1,%d\r\n", !modem_inet_get_ipv4_addresses(ip, dns1, dns2));
+        out_buf_write(out_buf, msg, len);
+        free(msg);
+        WRITE_OK(out_buf);
+    }
+    else if(!strncmp(cmd, "AT+CGACT=", 9))
+    {
+        //AT+CGACT=<state>[,<cid>]; only context 1 exists
+        char* end = NULL;
+        long state = strtol(cmd + 9, &end, 10);
+        long cid = 1;
+        if(end == cmd + 9 || (state != 0 && state != 1))
+            WRITE_ERROR(out_buf);
+        else if(*end == ',' && ((cid = strtol(end + 1, &end, 10)) != 1 || *end))
+            WRITE_ERROR(out_buf);
+        else if(*end)
+            WRITE_ERROR(out_buf);
+        else if(!state)
+        {
+            API_DEBUG("modem_inet_set_enabled(0)");
+            modem_inet_set_enabled(0);
+            API_DEBUG(" done\n");
+            st->cgact_wait = 0;
+            WRITE_OK(out_buf);
+        }
+        else
+        {
+            char ip[4], dns1[4], dns2[4];
+            if(!modem_inet_get_ipv4_addresses(ip, dns1, dns2))
+                WRITE_OK(out_buf); //already active
+            else if(!modem_inet_get_apn())
+                WRITE_ERROR(out_buf); //AT+CGDCONT first
+            else
+            {
+                API_DEBUG("modem_inet_set_enabled(1)");
+                int err = modem_inet_set_enabled(1);
+                API_DEBUG(" = %d\n", err);
+                if(err)
+                    WRITE_ERROR(out_buf);
+                else
+                {
+                    //the reply comes when the modem has the session up, or on timeout
+                    st->cgact_wait = ++cgact_request_counter;
+                    schedule_job(CGACT_TIMEOUT_NS, cgact_timeout_job, (void*)(intptr_t)st->cgact_wait);
+                }
+            }
+        }
+    }
+    else if(!strcmp(cmd, "AT+CGPADDR=?"))
+        WRITE_OK_STRING(out_buf, "\r\n+CGPADDR: (1)\r\n");
+    else if(!strcmp(cmd, "AT+CGPADDR") || !strcmp(cmd, "AT+CGPADDR=1"))
+    {
+        char ip[4], dns1[4], dns2[4];
+        char* msg = NULL;
+        int len;
+        if(modem_inet_get_ipv4_addresses(ip, dns1, dns2))
+            len = asprintf(&msg, "\r\n+CGPADDR: 1,\"0.0.0.0\"\r\n");
+        else
+            len = asprintf(&msg, "\r\n+CGPADDR: 1,\"%hhu.%hhu.%hhu.%hhu\"\r\n", ip[0], ip[1], ip[2], ip[3]);
+        out_buf_write(out_buf, msg, len);
+        free(msg);
+        WRITE_OK(out_buf);
+    }
+    else if(!strcmp(cmd, "AT+CGCONTRDP=?"))
+        WRITE_OK_STRING(out_buf, "\r\n+CGCONTRDP: (1)\r\n");
+    else if(!strcmp(cmd, "AT+CGCONTRDP") || !strcmp(cmd, "AT+CGCONTRDP=1"))
+    {
+        //+CGCONTRDP: <cid>,<bearer_id>,<apn>,<local_addr and subnet_mask>,<gw_addr>,<DNS_prim>,<DNS_sec>
+        //The modem gives no gateway and no netmask, it is a point-to-point link: /32, empty gateway.
+        //Nothing is printed while no context is active, as the spec says.
+        char ip[4], dns1[4], dns2[4];
+        if(!modem_inet_get_ipv4_addresses(ip, dns1, dns2))
+        {
+            const char* apn = modem_inet_get_apn();
+            char* msg = NULL;
+            int len = asprintf(&msg,
+                "\r\n+CGCONTRDP: 1,5,\"%s\",\"%hhu.%hhu.%hhu.%hhu.255.255.255.255\",\"\",\"%hhu.%hhu.%hhu.%hhu\",\"%hhu.%hhu.%hhu.%hhu\"\r\n",
+                apn ? apn : "",
+                ip[0], ip[1], ip[2], ip[3],
+                dns1[0], dns1[1], dns1[2], dns1[3],
+                dns2[0], dns2[1], dns2[2], dns2[3]);
+            out_buf_write(out_buf, msg, len);
+            free(msg);
+        }
+        WRITE_OK(out_buf);
+    }
     else if(!strcmp(cmd, "AT+CREG?") || !strcmp(cmd, "AT+CGREG?") || !strcmp(cmd, "AT+CEREG?"))
     {
         *strchr(cmd, '?') = 0;
@@ -1399,9 +1500,47 @@ void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz)
     free(ppp_pkt);
 }
 
+//answers the AT+CGACT=1 requests that are waiting; ok = 0 for failure. request = 0 means all of them
+static void cgact_finish(int ok, int request)
+{
+    for(int i = 0; i < FD_SETSIZE; i++)
+        if(connections[i] && connections[i]->status.cgact_wait
+        && (!request || connections[i]->status.cgact_wait == request))
+        {
+            connections[i]->status.cgact_wait = 0;
+            if(ok)
+                out_buf_write(&connections[i]->out_buf, "\r\nOK\r\n", 6);
+            else
+                out_buf_write(&connections[i]->out_buf, "\r\nERROR\r\n", 9);
+            modem_poll_fd_set(i, &wrsocks);
+        }
+}
+
+static int cgact_timeout_job(void* opaque)
+{
+    cgact_finish(0, (int)(intptr_t)opaque);
+    return 0;
+}
+
+static int inet_up; //last state announced to the clients, so each change is reported once
+
+void modem_inet_connected(void)
+{
+    API_DEBUG("callback: modem_inet_connected()\n");
+    inet_up = 1;
+    cgact_finish(1, 0);
+}
+
 void modem_inet_disconnected(void)
 {
     API_DEBUG("callback: modem_inet_disconnected()\n");
+    //Only tell clients the session is gone; a request that is still waiting is left to the timeout,
+    //because the modem also reports status changes while it is still setting the session up.
+    if(inet_up)
+    {
+        inet_up = 0;
+        broadcast_notification("\r\n+CGEV: NW PDN DEACT 1\r\n");
+    }
     char ppp[32] = {0xff, 0x03, 0xc0, 0x21, 0x05, 0x00, 0x00, 0x04};
     size_t ppp_size = 10;
     size_t ppp_cap = 32;

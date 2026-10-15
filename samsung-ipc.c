@@ -208,6 +208,7 @@ enum
     THREAD_REQ_TYPE_SMS_SEND,
     THREAD_REQ_TYPE_SMS_INCOMING,
     THREAD_REQ_TYPE_SET_GPRS,
+    THREAD_REQ_TYPE_GPRS_UP, //to the server: IP configuration received
     THREAD_REQ_TYPE_DIAL,
     THREAD_REQ_TYPE_SET_ONLINE,
     THREAD_REQ_TYPE_REGIST,
@@ -583,12 +584,15 @@ static void* sipc_thread(void* arg)
                     else
                     {
                         struct ipc_gprs_pdp_context_request_set_data data;
-                        char username[sizeof(data.username)];
-                        char password[sizeof(data.password)];
+                        char username[sizeof(data.username)] = {0};
+                        char password[sizeof(data.password)] = {0};
                         LOCKED()
                         {
-                            strncpy(username, gprs_username, sizeof(username));
-                            strncpy(password, gprs_password, sizeof(password));
+                            //no credentials are set when the session is activated with AT+CGACT instead of PPP/PAP
+                            if(gprs_username)
+                                strncpy(username, gprs_username, sizeof(username));
+                            if(gprs_password)
+                                strncpy(password, gprs_password, sizeof(password));
                         }
                         ipc_gprs_pdp_context_request_set_setup(&data, 1, 1, username, password);
                         ipc_client_send(fmt, seq_cntr++, IPC_GPRS_PDP_CONTEXT, IPC_TYPE_SET, &data, sizeof(data));
@@ -718,6 +722,11 @@ static void* sipc_thread(void* arg)
                     have_gprs = 1;
                 }
                 ifdownup();
+                struct thread_req* up = malloc(sizeof(*up));
+                up->type = THREAD_REQ_TYPE_GPRS_UP;
+                up->ptr = NULL;
+                up->size = 0;
+                write(thread_comm[1], &up, sizeof(up));
             }
         }
         else if(msg.command == IPC_GPRS_CALL_STATUS)
@@ -1125,6 +1134,8 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
         }
         else if(cmd->type == THREAD_REQ_TYPE_SET_GPRS && !cmd->size)
             modem_inet_disconnected();
+        else if(cmd->type == THREAD_REQ_TYPE_GPRS_UP)
+            modem_inet_connected();
         else if(cmd->type == THREAD_REQ_TYPE_REGIST)
             modem_registration_status_update();
         else if(cmd->type == THREAD_REQ_TYPE_IMEI)

@@ -148,6 +148,7 @@ int modem_inet_send_packet(int protocol, const char* pkt, size_t sz);
 
 /* mobile internet callbacks */
 void modem_inet_incoming_packet(int protocol, const char* pkt, size_t sz);
+void modem_inet_connected(void); //the IP configuration has arrived, see modem_inet_get_ipv4_addresses()
 void modem_inet_disconnected(void);
 
 /* utility */
