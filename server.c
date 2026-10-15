@@ -97,7 +97,6 @@ struct conn_status
     int sms_nr;
     int is_ppp;
     int want_retry;
-    int ppp_protocols;
 };
 
 //internal enum to facilitate storing protocols in a bitmask
@@ -108,6 +107,11 @@ enum
     MODEM_PROTOCOL_IPV6 = 1 << 1,
 };
 static const int PPP_PROTOCOLS[2] = {MODEM_PPP_PROTOCOL_IPV4, MODEM_PPP_PROTOCOL_IPV6};
+
+//The PDP context (APN, IP protocols) belongs to the modem, not to one port:
+//ModemManager sets it with AT+CGDCONT on the primary AT port and then dials
+//(ATD) on a different data port, so this must be shared between connections.
+static int ppp_protocols;
 
 static int handle_ppp(struct io_buf* out_buf, char* ppp, size_t ppp_size, int protocols)
 {
@@ -832,7 +836,16 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
     else if(!strcmp(cmd, "AT+CGDCONT=?"))
     {
         char* msg = NULL;
-        int len = asprintf(&msg, "\r\n+CGDCONT: (1),\"%s\",,,(0),(0)\r\n", get_cgdcont_pdp_type());
+        const char* type = get_cgdcont_pdp_type();
+        //Always list plain IPv4 too: clients like ModemManager build the
+        //set of supported IP families from these lines, and offering only
+        //"IPV4V6" makes them think IPv4 alone is unsupported (NetworkManager
+        //then refuses an IPv4-only connection). The modem does accept it.
+        int extra = type[0] && strcmp(type, "IP"); //type is empty until the modem reports protocols
+        int len = asprintf(&msg, "\r\n+CGDCONT: (1),\"IP\",,,(0),(0)\r\n%s%s%s",
+                           extra ? "+CGDCONT: (1),\"" : "",
+                           extra ? type : "",
+                           extra ? "\",,,(0),(0)\r\n" : "");
         out_buf_write(out_buf, msg, len);
         free(msg);
         WRITE_OK(out_buf);
@@ -881,7 +894,7 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
             WRITE_ERROR(out_buf);
         else
         {
-            st->ppp_protocols = mask;
+            ppp_protocols = mask;
             //TODO: string unescape
             char* quote = strchr(apn, '"');
             if(quote)
@@ -1046,7 +1059,7 @@ static void poll_at_commands(struct io_buf* in_buf, struct io_buf* out_buf, stru
     {
         if(st->is_ppp)
         {
-            if(handle_ppp(out_buf, cmd, ppp_size, st->ppp_protocols))
+            if(handle_ppp(out_buf, cmd, ppp_size, ppp_protocols))
             {
                 st->is_ppp = 0;
                 n_ppp--;
