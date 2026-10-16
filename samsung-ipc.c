@@ -182,6 +182,7 @@ static int sim_iccid_valid;
 static int net_status_cs, net_status_ps; //raw NET_REGIST status per service domain (0 = none seen yet)
 static int device_ready; //set once the modem reported SMS_DEVICE_READY and got its service domain
 static int gprs_enable_pending; //data was requested before that
+static char attached_apn[64]; //APN of the LTE attach profile the modem got, empty for none
 static int have_gprs;
 static int have_ipv6_link;
 static int rmnet_fd;
@@ -339,6 +340,7 @@ static void* sipc_thread(void* arg)
                 {
                     //also when already enabled: a redial after a failed activation (e.g. the modem was still
                     //re-registering after the service domain change) has to restart the whole sequence
+                    int redial = need_gprs; //a sequence was started before
                     need_gprs = 1;
                     struct ipc_gprs_define_pdp_context_data data;
                     char apn[sizeof(data.apn)] = {0};
@@ -351,8 +353,13 @@ static void* sipc_thread(void* arg)
                     //Shannon (LTE) modems only attach to the packet domain with an LTE attach profile
                     //in place, and without it they stay in "not ready" for the PDP activation below
                     struct ipc_gprs_lte_attach_apn_info_data attach;
-                    if(!ipc_gprs_lte_attach_apn_info_setup(&attach, 1, apn, NULL, NULL))
+                    //(not again when it was sent already for this APN: the modem re-registers on every one)
+                    if(!(attached_apn[0] && !redial && !strcmp(attached_apn, apn))
+                    && !ipc_gprs_lte_attach_apn_info_setup(&attach, 1, apn, NULL, NULL))
+                    {
                         ipc_client_send(fmt, seq_cntr++, IPC_GPRS_LTE_ATTACH_APN_INFO, IPC_TYPE_SET, &attach, sizeof(attach));
+                        snprintf(attached_apn, sizeof(attached_apn), "%s", apn);
+                    }
                     ipc_gprs_define_pdp_context_setup(&data, 1, 1, apn);
                     //if the modem doesn't support ipv6, it will probably respond with an error
                     //we'll then retry the request without this assignment to get ipv4 connectivity
@@ -690,6 +697,23 @@ static void* sipc_thread(void* arg)
             ipc_net_service_domain_config_setup(&domain, IPC_NET_SERVICE_DOMAIN_CONFIG_CS_PS);
             ipc_client_send(fmt, seq_cntr++, IPC_NET_SERVICE_DOMAIN_CONFIG, IPC_TYPE_SET, &domain, sizeof(domain));
             device_ready = 1;
+            {
+                //Attach to LTE with the default APN right away instead of at the first data request: the modem
+                //re-registers when it gets the profile, which used to eat the first dial
+                struct ipc_gprs_lte_attach_apn_info_data attach;
+                char apn[sizeof(attached_apn)] = {0};
+                LOCKED()
+                {
+                    if(gprs_apn)
+                        snprintf(apn, sizeof(apn), "%s", gprs_apn);
+                }
+                if(apn[0] && !ipc_gprs_lte_attach_apn_info_setup(&attach, 1, apn, NULL, NULL))
+                {
+                    ipc_client_send(fmt, seq_cntr++, IPC_GPRS_LTE_ATTACH_APN_INFO, IPC_TYPE_SET, &attach, sizeof(attach));
+                    snprintf(attached_apn, sizeof(attached_apn), "%s", apn);
+                    printf("attach profile sent at device ready\n");
+                }
+            }
             if(!sim_imsi && !sim_imsi_requested && modem_sim_get_status() == MODEM_SIM_READY)
             {
                 sim_imsi_requested = 1;
@@ -1112,6 +1136,10 @@ int modem_init(void)
         return -1;
     pthread_mutex_init(&global_lock, NULL);
     pthread_mutex_init(&sms_storage_lock, NULL);
+    //default APN, so the attach profile can go out as soon as the modem is ready (see SMS_DEVICE_READY)
+    const char* default_apn = getenv("SAMSUNGIPCD_APN");
+    if(default_apn && *default_apn)
+        modem_inet_set_apn(default_apn);
     if(socketpair(AF_UNIX, SOCK_STREAM, 0, thread_comm))
         return -1;
     pthread_t st;

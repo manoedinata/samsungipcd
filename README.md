@@ -159,6 +159,9 @@ with the old message sequence. Verified with a SIM that has an active data plan 
   request that arrives in the middle fails. A repeated enable restarts the sequence, so a redial
   works; ModemManager/NetworkManager retry on their own.
 * A data request that comes before the modem is ready is held until it is.
+* With `SAMSUNGIPCD_APN` set in the daemon's environment, the attach profile is sent as soon as the modem is
+  ready instead of at the first data request, so the modem has settled on LTE by the time something dials.
+  (`AT+CGDCONT` still overrides the APN later; it is attached again only if it differs.)
 * The IP configuration only needs the IP address; the second DNS server can be missing.
 
 The layouts were read from the stock `libsec-ril.so` and checked against the modem. The names of
