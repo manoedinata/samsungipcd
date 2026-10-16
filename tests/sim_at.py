@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks the SIM related AT commands (AT+CPIN?, AT+CIMI, AT+SIMSTATE?, AT+CMEE)
+"""Checks the SIM related AT commands (AT+CPIN?, AT+CIMI, AT+CCID, AT+CRSM, AT+SIMSTATE?, AT+CMEE)
 against the simulator for every SIM state and every error format.
 
     make samsungipcd-sim && python3 tests/sim_at.py ./samsungipcd-sim
@@ -54,5 +54,12 @@ for st in ("READY", "ABSENT", "UNKNOWN", "PIN"):
 check("SIMSTATE? READY ", ask("READY", 0, "AT+SIMSTATE?"), ["+SIMSTATE: 1", "OK"])
 check("SIMSTATE? ABSENT", ask("ABSENT", 0, "AT+SIMSTATE?"), ["+SIMSTATE: 0", "OK"])
 check("SIMSTATE? PIN   ", ask("PIN", 0, "AT+SIMSTATE?"), ["+SIMSTATE: 0", "OK"])
+check("CCID  READY (digits, F padding dropped)", ask("READY", 0, "AT+CCID"), ["+CCID: 8900000000000000000", "OK"])
+check("ICCID READY", ask("READY", 0, "AT+ICCID"), ["+CCID: 8900000000000000000", "OK"])
+check("CRSM  read EF_ICCID", ask("READY", 0, "AT+CRSM=176,12258,0,0,10"), ['+CRSM: 144,0,"%s"' % ("98" + "00" * 8 + "F0"), "OK"])
+check("CRSM  other file is not available", ask("READY", 0, "AT+CRSM=176,28474,0,0,10"), ["ERROR"])
+check("CCID  ABSENT cmee=1", ask("ABSENT", 1, "AT+CCID"), ["+CME ERROR: 10"])
+check("CCID  UNKNOWN cmee=1", ask("UNKNOWN", 1, "AT+CCID"), ["+CME ERROR: 14"])
+check("CRSM  ABSENT cmee=0", ask("ABSENT", 0, "AT+CRSM=176,12258,0,0,10"), ["ERROR"])
 print("\n%s" % ("ALL PASSED" if not fails else "%d FAILED" % fails))
 sys.exit(1 if fails else 0)

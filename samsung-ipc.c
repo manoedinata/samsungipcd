@@ -174,6 +174,11 @@ static int sim_status = -1; //raw IPC_SEC_PIN_STATUS_*, -1 until the modem has s
 static int sim_facility_lock; //IPC_SEC_FACILITY_LOCK_TYPE_* that goes with sim_status
 static char* sim_imsi; //NULL until it has been read from the SIM
 static int sim_imsi_requested;
+//The modem announces the card's ICCID once the SIM is up (what the stock RIL's IpcRxNotiICCID handles): a length
+//byte (10) and the EF_ICCID contents, BCD with the digits swapped in every byte and padded with 0xf
+#define IPC_SEC_SIM_ICCID_NOTI 0x050c
+static unsigned char sim_iccid[10];
+static int sim_iccid_valid;
 static int net_status_cs, net_status_ps; //raw NET_REGIST status per service domain (0 = none seen yet)
 static int device_ready; //set once the modem reported SMS_DEVICE_READY and got its service domain
 static int gprs_enable_pending; //data was requested before that
@@ -640,6 +645,7 @@ static void* sipc_thread(void* arg)
                         free(sim_imsi);
                         sim_imsi = NULL;
                         sim_imsi_requested = 0;
+                        sim_iccid_valid = 0;
                     }
                 }
                 printf("sim status = 0x%02x, facility lock = %d\n", status, lock);
@@ -663,6 +669,19 @@ static void* sipc_thread(void* arg)
             }
             if(!imsi)
                 sim_imsi_requested = 0; //ask again at the next SIM status or when the device is ready
+        }
+        else if(msg.command == IPC_SEC_SIM_ICCID_NOTI)
+        {
+            unsigned char* d = msg.data;
+            int ok = msg.data && msg.size == 1 + sizeof(sim_iccid) && d[0] == sizeof(sim_iccid);
+            //the ICCID identifies the card, never print it
+            printf("sim iccid %s\n", ok ? "read" : "unexpected format");
+            if(ok)
+                LOCKED()
+                {
+                    memcpy(sim_iccid, d + 1, sizeof(sim_iccid));
+                    sim_iccid_valid = 1;
+                }
         }
         else if(msg.command == IPC_SMS_DEVICE_READY)
         {
@@ -1359,6 +1378,20 @@ int modem_sim_get_imsi(char imsi[16])
         {
             memset(imsi, 0, 16);
             strncpy(imsi, sim_imsi, 15);
+            ans = 0;
+        }
+    }
+    return ans;
+}
+
+int modem_sim_get_iccid(unsigned char iccid[10])
+{
+    int ans = -1;
+    LOCKED()
+    {
+        if(sim_iccid_valid)
+        {
+            memcpy(iccid, sim_iccid, sizeof(sim_iccid));
             ans = 0;
         }
     }

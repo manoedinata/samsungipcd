@@ -809,8 +809,40 @@ static int handle_at_command(struct io_buf* out_buf, struct conn_status* st, cha
         out_buf_write(out_buf, buf, len);
         free(buf);
     }
-    else if(!strcmp(cmd, "AT+CRSM=176,12258,0,0,10")) //TODO: stub
-        WRITE_OK_STRING(out_buf, "\r\n+CRSM: 159,10,989422024754212460F6\r\n");
+    else if(!strcmp(cmd, "AT+CCID") || !strcmp(cmd, "AT+ICCID") || !strcmp(cmd, "AT+CRSM=176,12258,0,0,10"))
+    {
+        //EF_ICCID is the only SIM file that can be read: the modem announces its contents, there is no
+        //general access to the card. AT+CRSM is what ModemManager reads it with.
+        unsigned char raw[10];
+        if(modem_sim_get_iccid(raw))
+            write_cme_error(out_buf, modem_sim_get_status() == MODEM_SIM_ABSENT ? 10 : 14);
+        else
+        {
+            char hex[21], digits[21];
+            int nd = 0;
+            for(int i = 0; i < 10; i++)
+            {
+                sprintf(hex + 2 * i, "%02X", raw[i]);
+                //the digits are swapped in each byte; 0xf pads
+                for(int nib = 0; nib < 2; nib++)
+                {
+                    int v = nib ? raw[i] >> 4 : raw[i] & 15;
+                    if(v < 10)
+                        digits[nd++] = '0' + v;
+                }
+            }
+            digits[nd] = 0;
+            char* msg = NULL;
+            int len;
+            if(!strncmp(cmd, "AT+CRSM", 7))
+                len = asprintf(&msg, "\r\n+CRSM: 144,0,\"%s\"\r\n", hex);
+            else
+                len = asprintf(&msg, "\r\n+CCID: %s\r\n", digits);
+            out_buf_write(out_buf, msg, len);
+            free(msg);
+            WRITE_OK(out_buf);
+        }
+    }
     else if(!strcmp(cmd, "AT+CSQ"))
     {
         API_DEBUG("modem_registration_get_rssi()");

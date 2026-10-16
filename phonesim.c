@@ -207,6 +207,14 @@ int modem_sim_get_imsi(char imsi[16])
     return 0;
 }
 
+int modem_sim_get_iccid(unsigned char iccid[10])
+{
+    if(modem_sim_get_status() != MODEM_SIM_READY)
+        return -1;
+    memcpy(iccid, "\x98\x00\x00\x00\x00\x00\x00\x00\x00\xf0", 10); //made up: 89 00 00 00 00 00 00 00 00 0
+    return 0;
+}
+
 int modem_registration_get_status(void)
 {
     return is_online ? MODEM_REGISTRATION_HOME_NETWORK : MODEM_REGISTRATION_NOT_REGISTERED;

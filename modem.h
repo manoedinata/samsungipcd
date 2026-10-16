@@ -119,6 +119,7 @@ enum
 };
 int modem_sim_get_status(void);
 int modem_sim_get_imsi(char imsi[16]); //0 on success, NUL terminated, up to 15 digits
+int modem_sim_get_iccid(unsigned char iccid[10]); //0 on success; the EF_ICCID contents (BCD, digits swapped in each byte)
 
 int modem_registration_get_status(void); //circuit switched, 3GPP <stat> as in +CREG
 int modem_registration_get_ps_status(void); //packet switched (+CGREG, and +CEREG on LTE), same values

@@ -22,7 +22,7 @@ This copy is a fork of [sleirsgoevy/samsungipcd](https://gitlab.com/sleirsgoevy/
 * SIM unlocking
 * IPv6 on Shannon modems (the modem side has not been tried)
 * Entering a PIN or PUK (`AT+CPIN=`); a locked SIM is reported but cannot be unlocked here
-* The ICCID and the phone number (`AT+CCID`, `AT+CNUM`)
+* The phone number (`AT+CNUM`) and reading any SIM file other than the ICCID (`AT+CRSM`): the Shannon modem answers the plain `IPC_SEC_RSIM_ACCESS` request with a failure and the layout the stock RIL uses was not worked out
 
 ## Building
 
@@ -169,7 +169,7 @@ The SIM is reported from what the modem says: `AT+CPIN?` answers `READY`, `SIM P
 `PH-... PIN` personalisation locks, and `AT+CIMI` returns the IMSI read from the SIM once it is ready. While the
 card is absent, faulty or the modem has not said anything yet, they fail with `+CME ERROR` 10, 13 or 14
 (`SIM not inserted`, `SIM failure`, `SIM busy`). `AT+CMEE=0|1|2` selects how errors look (plain `ERROR`,
-numeric or with text), as ModemManager expects. Seen on the J4: ready for the SIM in slot 2; the lock states
+numeric or with text), as ModemManager expects. `AT+CCID` (also `AT+ICCID`) returns the card number, which the modem announces once the SIM is up; `AT+CRSM=176,12258,0,0,10`, how ModemManager reads it, is answered with the same EF_ICCID contents. Seen on the J4: ready for the SIM in slot 2; the lock states
 follow libsamsung-ipc's definitions and have not been tried.
 
 Registration is reported separately for the circuit and the packet domain (`+CREG`, `+CGREG`) and,
