@@ -291,6 +291,54 @@ static const int channel_volumes[4][2] = {
 };
 
 //XXX: length is 8-bit in many requests. we should probably check for overflow when creating them
+static int net_setup_done; //domain config and attach profile were sent
+static int early_setup; //do that as soon as the SIM is up, not when the modem says SMS_DEVICE_READY
+
+//What the modem needs before it can do packet data, see SMS_DEVICE_READY
+static void net_setup(struct ipc_client* fmt, const char* when)
+{
+    if(net_setup_done)
+        return;
+    net_setup_done = 1;
+    printf("setting up packet service (%s)\n", when);
+    //the modem boots with circuit switched service only; packet data needs CS+PS
+    struct ipc_net_service_domain_config_data domain;
+    ipc_net_service_domain_config_setup(&domain, IPC_NET_SERVICE_DOMAIN_CONFIG_CS_PS);
+    ipc_client_send(fmt, seq_cntr++, IPC_NET_SERVICE_DOMAIN_CONFIG, IPC_TYPE_SET, &domain, sizeof(domain));
+    device_ready = 1;
+    {
+        //Attach to LTE with the default APN right away instead of at the first data request: the modem
+        //re-registers when it gets the profile, which used to eat the first dial
+        struct ipc_gprs_lte_attach_apn_info_data attach;
+        char apn[sizeof(attached_apn)] = {0};
+        LOCKED()
+        {
+            if(gprs_apn)
+                snprintf(apn, sizeof(apn), "%s", gprs_apn);
+        }
+        if(apn[0] && !ipc_gprs_lte_attach_apn_info_setup(&attach, 1, apn, NULL, NULL))
+        {
+            ipc_client_send(fmt, seq_cntr++, IPC_GPRS_LTE_ATTACH_APN_INFO, IPC_TYPE_SET, &attach, sizeof(attach));
+            snprintf(attached_apn, sizeof(attached_apn), "%s", apn);
+            printf("attach profile sent\n");
+        }
+    }
+    if(!sim_imsi && !sim_imsi_requested && modem_sim_get_status() == MODEM_SIM_READY)
+    {
+        sim_imsi_requested = 1;
+        ipc_client_send(fmt, seq_cntr++, IPC_MISC_ME_IMSI, IPC_TYPE_GET, NULL, 0);
+    }
+    if(gprs_enable_pending)
+    {
+        gprs_enable_pending = 0;
+        struct thread_req* req = malloc(sizeof(*req));
+        req->type = THREAD_REQ_TYPE_SET_GPRS;
+        req->ptr = NULL;
+        req->size = 1;
+        write(thread_comm[1], &req, sizeof(req));
+    }
+}
+
 static void* sipc_thread(void* arg)
 {
     fcntl(thread_comm[1], F_SETFL, fcntl(thread_comm[1], F_GETFL) | O_NONBLOCK);
@@ -645,6 +693,8 @@ static void* sipc_thread(void* arg)
                     else
                         printf("mode probe: supported modes = %d\n", mode_current);
                 }
+                else if(cmd == IPC_NET_SERVICE_DOMAIN_CONFIG || cmd == IPC_GPRS_LTE_ATTACH_APN_INFO)
+                    printf("%s answered, code 0x%04x\n", cmd == IPC_NET_SERVICE_DOMAIN_CONFIG ? "service domain config" : "attach profile", pld->code);
                 else if(cmd == IPC_GPRS_DEFINE_PDP_CONTEXT && need_gprs)
                 {
                     int failed = (pld->code & 1); //same custom check as above
@@ -720,6 +770,8 @@ static void* sipc_thread(void* arg)
                     }
                 }
                 printf("sim status = 0x%02x, facility lock = %d\n", status, lock);
+                if(early_setup && status == IPC_SEC_PIN_STATUS_INIT_COMPLETE)
+                    net_setup(fmt, "sim up");
                 if(ready && !sim_imsi_requested)
                 {
                     //the IMSI can only be read once the SIM is up
@@ -756,42 +808,7 @@ static void* sipc_thread(void* arg)
         }
         else if(msg.command == IPC_SMS_DEVICE_READY)
         {
-            //the modem boots with circuit switched service only; packet data needs CS+PS
-            struct ipc_net_service_domain_config_data domain;
-            ipc_net_service_domain_config_setup(&domain, IPC_NET_SERVICE_DOMAIN_CONFIG_CS_PS);
-            ipc_client_send(fmt, seq_cntr++, IPC_NET_SERVICE_DOMAIN_CONFIG, IPC_TYPE_SET, &domain, sizeof(domain));
-            device_ready = 1;
-            {
-                //Attach to LTE with the default APN right away instead of at the first data request: the modem
-                //re-registers when it gets the profile, which used to eat the first dial
-                struct ipc_gprs_lte_attach_apn_info_data attach;
-                char apn[sizeof(attached_apn)] = {0};
-                LOCKED()
-                {
-                    if(gprs_apn)
-                        snprintf(apn, sizeof(apn), "%s", gprs_apn);
-                }
-                if(apn[0] && !ipc_gprs_lte_attach_apn_info_setup(&attach, 1, apn, NULL, NULL))
-                {
-                    ipc_client_send(fmt, seq_cntr++, IPC_GPRS_LTE_ATTACH_APN_INFO, IPC_TYPE_SET, &attach, sizeof(attach));
-                    snprintf(attached_apn, sizeof(attached_apn), "%s", apn);
-                    printf("attach profile sent at device ready\n");
-                }
-            }
-            if(!sim_imsi && !sim_imsi_requested && modem_sim_get_status() == MODEM_SIM_READY)
-            {
-                sim_imsi_requested = 1;
-                ipc_client_send(fmt, seq_cntr++, IPC_MISC_ME_IMSI, IPC_TYPE_GET, NULL, 0);
-            }
-            if(gprs_enable_pending)
-            {
-                gprs_enable_pending = 0;
-                struct thread_req* req = malloc(sizeof(*req));
-                req->type = THREAD_REQ_TYPE_SET_GPRS;
-                req->ptr = NULL;
-                req->size = 1;
-                write(thread_comm[1], &req, sizeof(req));
-            }
+            net_setup(fmt, "device ready");
             ipc_client_send(fmt, seq_cntr++, IPC_SMS_SVC_CENTER_ADDR, IPC_TYPE_GET, NULL, 0);
         }
         else if(msg.command == IPC_SMS_SVC_CENTER_ADDR)
@@ -1200,6 +1217,7 @@ int modem_init(void)
         return -1;
     pthread_mutex_init(&global_lock, NULL);
     pthread_mutex_init(&sms_storage_lock, NULL);
+    early_setup = getenv("SAMSUNGIPCD_EARLY") != NULL;
     //default APN, so the attach profile can go out as soon as the modem is ready (see SMS_DEVICE_READY)
     const char* default_apn = getenv("SAMSUNGIPCD_APN");
     if(default_apn && *default_apn)

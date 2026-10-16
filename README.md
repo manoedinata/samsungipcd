@@ -186,3 +186,40 @@ in `samsung-ipc.c`.
 
 Known limitations on the J4: the SIM is only detected in slot 2; IPv6, other carriers and an
 inactive data plan have not been tried.
+
+### Time to the first data connection (Galaxy J4)
+
+Measured on cold boots, uptime in seconds, with one SIM (Telkomsel, slot 2); the numbers are one boot each, not averages.
+
+| Step | Before | With the changes below |
+|---|---|---|
+| Modem boot complete | 10.4 | 8.8 |
+| `SMS_DEVICE_READY` from the modem | ~25 | ~25 |
+| LTE switch (modem re-registers) | ~33 | ~24 |
+| Data session up (`IPC_GPRS_IP_CONFIGURATION`) | ~62-65 | ~40 |
+
+What was slowing it down, and what was done:
+
+* The service raced the `/efs` mount (the modem boot reads `/efs/nv_data.bin`), exited and was restarted 2.4 s later.
+  `RequiresMountsFor=/efs` fixes that.
+* The LTE attach profile went out at the first data request, which made the modem re-register (and lose that request)
+  right then. It is now sent in advance, with the APN in `SAMSUNGIPCD_APN` (see `/etc/default/samsungipcd`).
+* ModemManager cancelled its first dial on the short "not registered" the modem reports during that re-registration, and
+  NetworkManager retried ~30 s later. Registration drops shorter than 4 s are not passed on (`REGISTRATION_HOLD_MS`),
+  and if packet service comes back while data is wanted and not up, the activation is repeated.
+* `SMS_DEVICE_READY` is a notification the modem sends by itself ~15 s after the SIM is up (right after the SIM's
+  "phonebook init complete" status `0x83`). The service domain and attach profile used to wait for it. With
+  `SAMSUNGIPCD_EARLY=1` they are sent when the SIM reports "init complete" (`0x82`, ~10 s) instead, and the modem
+  accepted both (answer code `0x8000`). That run had no failed dial. If no SIM comes up, the old trigger still runs the setup.
+
+Not verified / TODO:
+
+* `SAMSUNGIPCD_EARLY` has been run on one boot only. Repeat a few boots, then decide whether it should be the default.
+* ~16 s pass between the LTE switch (24 s) and the data session (40 s) and it is not known what is being waited for
+  (the modem, ModemManager's or NetworkManager's timing). In that window the activation is repeated three times by the
+  "packet service is back" logic; check that this does no harm and whether it can be once.
+* No SIM, a SIM without a data plan and other carriers were not tried with the registration hold-off.
+* Idea: support `AT+CREG=n`, `AT+CGREG=n` and `AT+CEREG=n` so ModemManager is told about registration changes at once
+  instead of polling.
+* SIM files other than the ICCID (`AT+CRSM`) and `AT+CNUM` do not work yet: see the Unimplemented list.
+
