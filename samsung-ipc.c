@@ -170,6 +170,10 @@ static char gprs_dns1[4];
 static char gprs_dns2[4];
 static char ipv6_link_id[8];
 static int need_gprs;
+static int map_registration_status(int status, int packet);
+static int registration_hold_job(void* opaque);
+static int redo_without_attach; //the next enable follows a re-registration: the attach profile is in place
+static int ps_was_registered; //packet registration as of the last NET_REGIST
 static int sim_status = -1; //raw IPC_SEC_PIN_STATUS_*, -1 until the modem has said something
 static int sim_facility_lock; //IPC_SEC_FACILITY_LOCK_TYPE_* that goes with sim_status
 static char* sim_imsi; //NULL until it has been read from the SIM
@@ -180,6 +184,30 @@ static int sim_imsi_requested;
 static unsigned char sim_iccid[10];
 static int sim_iccid_valid;
 static int net_status_cs, net_status_ps; //raw NET_REGIST status per service domain (0 = none seen yet)
+//The modem briefly reports "not registered" while it re-registers (e.g. after the LTE attach profile), and clients such as
+//ModemManager cancel what they are doing on that. A drop is only passed on when it lasts longer than this.
+#define REGISTRATION_HOLD_MS 4000
+static int cs_good, ps_good; //last raw status that meant registered, per domain
+static int64_t cs_good_ms, ps_good_ms; //when it was seen
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+static int registered_raw(int st) { return st == 2 || st == 7 || st == 10; }
+//the status to tell clients: the last registered one while a short drop is being waited out
+static int held_status(int raw, int good, int64_t good_ms)
+{
+    if(raw == 1 && good && now_ms() - good_ms < REGISTRATION_HOLD_MS)
+        return good;
+    return raw;
+}
+static int registration_hold_active(void)
+{
+    return net_status_cs != held_status(net_status_cs, cs_good, cs_good_ms)
+        || net_status_ps != held_status(net_status_ps, ps_good, ps_good_ms);
+}
 static int device_ready; //set once the modem reported SMS_DEVICE_READY and got its service domain
 static int gprs_enable_pending; //data was requested before that
 static char attached_apn[64]; //APN of the LTE attach profile the modem got, empty for none
@@ -340,7 +368,8 @@ static void* sipc_thread(void* arg)
                 {
                     //also when already enabled: a redial after a failed activation (e.g. the modem was still
                     //re-registering after the service domain change) has to restart the whole sequence
-                    int redial = need_gprs; //a sequence was started before
+                    int redial = need_gprs && !redo_without_attach; //a sequence was started before and the modem did not just re-register
+                    redo_without_attach = 0;
                     need_gprs = 1;
                     struct ipc_gprs_define_pdp_context_data data;
                     char apn[sizeof(data.apn)] = {0};
@@ -495,9 +524,23 @@ static void* sipc_thread(void* arg)
                 //circuit and packet service are attached together.
                 int domain = GET(data->domain);
                 if(domain != IPC_NET_SERVICE_DOMAIN_GPRS)
+                {
                     net_status_cs = net_status;
+                    if(registered_raw(net_status))
+                    {
+                        cs_good = net_status;
+                        cs_good_ms = now_ms();
+                    }
+                }
                 if(domain != IPC_NET_SERVICE_DOMAIN_GSM)
+                {
                     net_status_ps = net_status;
+                    if(registered_raw(net_status))
+                    {
+                        ps_good = net_status;
+                        ps_good_ms = now_ms();
+                    }
+                }
                 net_tech = GET(data->act);
                 net_lac = GET(data->lac);
                 net_cid = GET(data->cid);
@@ -522,6 +565,27 @@ static void* sipc_thread(void* arg)
                     net_tac = -1;
                 }
                 printf("net_status = %d, act = %d, lac = %d, cid = %d, tac = %d, domain = %d, fail_cause = %d\n", net_status, net_tech, net_lac, net_cid, net_tac, GET(data->domain), GET(data->fail_cause));
+            }
+            //The modem re-registers (and loses a data request that is in flight) when it gets the LTE attach profile.
+            //When packet service comes back while data is wanted and not up, run the activation again right away
+            //instead of leaving the client to time out.
+            int ps_reg, redo;
+            LOCKED()
+            {
+                int st = map_registration_status(net_status_ps, 1);
+                ps_reg = (st == 1 || st == 5);
+                redo = ps_reg && !ps_was_registered && need_gprs && !have_gprs && device_ready;
+                ps_was_registered = ps_reg;
+            }
+            if(redo)
+            {
+                printf("packet service is back, repeating the data activation\n");
+                struct thread_req* again = malloc(sizeof(*again));
+                again->type = THREAD_REQ_TYPE_SET_GPRS;
+                again->ptr = NULL;
+                again->size = 1;
+                redo_without_attach = 1;
+                write(thread_comm[1], &again, sizeof(again));
             }
             struct thread_req* req = malloc(sizeof(*req));
             req->type = THREAD_REQ_TYPE_REGIST;
@@ -1240,7 +1304,13 @@ static int do_poll(const struct modem_fd_set* rs, const struct modem_fd_set* ws,
         else if(cmd->type == THREAD_REQ_TYPE_GPRS_UP)
             modem_inet_connected();
         else if(cmd->type == THREAD_REQ_TYPE_REGIST)
+        {
             modem_registration_status_update();
+            int holding;
+            LOCKED() holding = registration_hold_active();
+            if(holding) //tell the clients when the wait is over, if the drop is still there then
+                schedule_job((REGISTRATION_HOLD_MS + 100) * 1000000ULL, registration_hold_job, NULL);
+        }
         else if(cmd->type == THREAD_REQ_TYPE_IMEI)
             update_one_owned(&imei, cmd->ptr);
         else if(cmd->type == THREAD_REQ_TYPE_USSD && !cmd->ptr)
@@ -1426,17 +1496,23 @@ int modem_sim_get_iccid(unsigned char iccid[10])
     return ans;
 }
 
+static int registration_hold_job(void* opaque)
+{
+    modem_registration_status_update();
+    return 0;
+}
+
 int modem_registration_get_status(void)
 {
     int ans;
-    LOCKED() ans = map_registration_status(net_status_cs, 0);
+    LOCKED() ans = map_registration_status(held_status(net_status_cs, cs_good, cs_good_ms), 0);
     return ans;
 }
 
 int modem_registration_get_ps_status(void)
 {
     int ans;
-    LOCKED() ans = map_registration_status(net_status_ps, 1);
+    LOCKED() ans = map_registration_status(held_status(net_status_ps, ps_good, ps_good_ms), 1);
     return ans;
 }
 

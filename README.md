@@ -162,6 +162,10 @@ with the old message sequence. Verified with a SIM that has an active data plan 
 * With `SAMSUNGIPCD_APN` set in the daemon's environment, the attach profile is sent as soon as the modem is
   ready instead of at the first data request, so the modem has settled on LTE by the time something dials.
   (`AT+CGDCONT` still overrides the APN later; it is attached again only if it differs.)
+* The modem briefly reports "not registered" while it re-registers after the attach profile. A drop shorter than
+  4 s is not passed on (`REGISTRATION_HOLD_MS` in `samsung-ipc.c`), because clients like ModemManager cancel what
+  they are doing on it, and when packet service comes back while data is wanted and not up the activation is repeated
+  at once.
 * The IP configuration only needs the IP address; the second DNS server can be missing.
 
 The layouts were read from the stock `libsec-ril.so` and checked against the modem. The names of
