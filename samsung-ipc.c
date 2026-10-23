@@ -368,7 +368,17 @@ static void* sipc_thread(void* arg)
             .fds = &rdfd,
             .count = 1,
         };
-        ipc_client_poll(fmt, &pfds, NULL);
+        if(ipc_client_poll(fmt, &pfds, NULL) < 0)
+        {
+            //libsamsung-ipc's poll fails once the kernel reports the modem
+            //as neither ONLINE nor BOOTING (CP crash, watchdog, reset). The
+            //only way back is a new boot of the CP, which is what a fresh
+            //start of this daemon does: exit with an error and let the
+            //service manager (Restart=on-failure) restart it. Looping here
+            //instead spins on a hung-up channel forever.
+            fprintf(stderr, "modem is gone (CP crash or reset), exiting for a restart\n");
+            exit(1);
+        }
         struct thread_req* ptr;
         while(read(thread_comm[1], &ptr, sizeof(ptr)) == sizeof(ptr))
         {
