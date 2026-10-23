@@ -1830,6 +1830,18 @@ static int open_pty(const char* path, struct modem_fd_set* rdsocks)
             close(fd);
             return -1;
         }
+        //fd2 stays open so that the slave keeps its settings (a legacy
+        //pty resets them on the last close). Like the CUSE pty below it
+        //has to be raw: in the default cooked mode with echo every
+        //notification we write comes straight back as a "command", gets
+        //an ERROR, which is echoed again - an endless ERROR flood that
+        //ModemManager's AT probe drowns in.
+        struct termios tios;
+        if(!tcgetattr(fd2, &tios))
+        {
+            cfmakeraw(&tios);
+            tcsetattr(fd2, TCSANOW, &tios);
+        }
     }
     struct client_conn* conn = malloc(sizeof(*conn));
     memset(conn, 0, sizeof(*conn));
