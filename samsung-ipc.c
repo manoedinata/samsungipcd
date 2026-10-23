@@ -830,7 +830,13 @@ static void* sipc_thread(void* arg)
         {
             struct ipc_sms_deliver_report_request_data delr;
             struct ipc_sms_incoming_msg_header* hdr = msg.data;
-            delr.type = IPC_SMS_TYPE_STATUS_REPORT;
+            //Acknowledge with the type the message came with
+            //(POINT_TO_POINT for a delivered SMS). With STATUS_REPORT
+            //the network re-delivered the same SMS seconds later, and
+            //the Shannon CP crashed (CP_CRASH_EXIT) after acknowledging
+            //the duplicate. The last byte used to go out uninitialised.
+            memset(&delr, 0, sizeof(delr));
+            delr.type = GET(hdr->type);
             delr.ack = IPC_SMS_ACK_NO_ERROR;
             delr.id = GET(hdr->id);
             size_t length = GET(hdr->length);
